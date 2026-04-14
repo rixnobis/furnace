@@ -2736,6 +2736,31 @@ void DivEngine::registerSystems() {
     c64PostEffectHandlerMap
   );
 
+  sysDefs[DIV_SYSTEM_PS1_SPU]=new DivSysDef(
+    _("PlayStation"), NULL, 0xe1, 0, 24, 24, 24,
+    false, true, 0, false, 1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM, 0, 0,
+    _("the Sony PlayStation's Sound Processing Unit, with 24 ADPCM channels, hardware ADSR, pitch modulation, and noise."),
+    DivChanDefFunc([](unsigned short ch) -> DivChanDef {
+      return DivChanDef(
+        fmt::sprintf(_("CH%d"),ch+1),
+        fmt::sprintf("C%02d",ch),
+        DIV_CH_PCM,
+        DIV_INS_SNES,
+        DIV_INS_AMIGA
+      );
+    }),
+    {},
+    {
+      {0x11, {DIV_CMD_STD_NOISE_MODE, _("11xx: Toggle noise mode")}},
+      {0x13, {DIV_CMD_SNES_PITCH_MOD, _("13xx: Toggle pitch modulation")}},
+      {0x1d, {DIV_CMD_STD_NOISE_FREQ, _("1Dxx: Set noise frequency (00 to 1F)")}},
+      {0x20, {DIV_CMD_FM_AR, _("20xx: Set attack (0 to F)")}},
+      {0x21, {DIV_CMD_FM_DR, _("21xx: Set decay (0 to 7)")}},
+      {0x22, {DIV_CMD_FM_SL, _("22xx: Set sustain (0 to 7)")}},
+      {0x23, {DIV_CMD_FM_RR, _("23xx: Set release (00 to 1F)")}},
+    }
+  );
+
   sysDefs[DIV_SYSTEM_DUMMY]=new DivSysDef(
     _("Dummy System"), NULL, 0xfd, 0, 8, 1, 128,
     false, true, 0, false, 0, 0, 0,

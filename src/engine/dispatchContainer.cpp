@@ -686,6 +686,10 @@ void DivDispatchContainer::init(DivSystem sys, DivEngine* eng, int chanCount, do
     case DIV_SYSTEM_SNES:
       dispatch=new DivPlatformSNES;
       break;
+    case DIV_SYSTEM_PS1_SPU:
+      dispatch=new DivPlatformSNES;
+      ((DivPlatformSNES*)dispatch)->setPS1Mode(true);
+      break;
     case DIV_SYSTEM_K007232:
       dispatch=new DivPlatformK007232;
       break;
