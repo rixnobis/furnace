@@ -883,14 +883,28 @@ void DivPlatformSNES::forceIns() {
     if (!ps1Mode && chan[i].active && chan[i].useWave) {
       updateWave(i);
     }
+    if (ps1Mode && chan[i].active) {
+      // force re-send envelope state for active PS1 voices
+      chan[i].shallWriteEnv=true;
+      // invalidate register cache for this voice so all writes go through
+      memset(&ps1RegCache[i*0x10],0xff,0x10);
+    }
     writeOutVol(i);
   }
   writeControl=true;
   writeNoise=true;
   writePitchMod=true;
-  writeEcho=true;
+  writeEcho=!ps1Mode;
   writeDryVol=true;
-  initEcho();
+  if (!ps1Mode) {
+    initEcho();
+  }
+  if (ps1Mode) {
+    // invalidate global register cache
+    for (int i=0x180; i<0x1A0; i++) {
+      ps1RegCache[i]=0xffff;
+    }
+  }
 }
 
 void* DivPlatformSNES::getChanState(int ch) {
