@@ -148,11 +148,13 @@ void DivEngine::registerROMExports() {
     "PS1 SPU register write stream.\n"
     "packet-based format with pattern/order structure,\n"
     "sample data, and seekable pattern entry points.\n"
-    "designed for trivial PS1-side playback.",
-    "SPU dump file", ".spudump",
+    "designed for trivial PS1-side playback.\n"
+    "exports two files: song (.spudump) and samples (.spubank).\n"
+    "samples can be shared across multiple songs.",
+    "SPU dump files", ".spudump",
     {
       DIV_SYSTEM_PS1_SPU
     },
-    false, DIV_REQPOL_EXACT
+    true, DIV_REQPOL_EXACT
   );
 }

@@ -144,13 +144,15 @@ void DivExportSPUDump::run() {
   SafeWriter* w=new SafeWriter;
   w->init();
 
-  // Phase 1: magic header (16 bytes)
-  w->write("PSXS",4);
-  w->write("PUDU",4);
-  w->write("MPv1",4);
-  w->write("r1\0\0",4);
+  // Sample bank file (standalone SPUDUMP with only sample packets)
+  SafeWriter* wb=new SafeWriter;
+  wb->init();
 
-  // Phase 2: metadata packets
+  // Phase 1: magic headers (16 bytes each)
+  w->write("PSXS",4);  w->write("PUDU",4);  w->write("MPv1",4);  w->write("r1\0\0",4);
+  wb->write("PSXS",4); wb->write("PUDU",4); wb->write("MPv1",4); wb->write("r1\0\0",4);
+
+  // Phase 2: metadata packets (song file only)
   if (!e->song.name.empty()) {
     writeStringPacket(w,SPUD_PKT_TITLE,e->song.name.c_str());
   }
@@ -169,9 +171,9 @@ void DivExportSPUDump::run() {
   writeWordPacket(w,SPUD_PKT_TICK_RATE,tickRate);
 
   // Phase 4: sample data
-  // collect all samples and write them contiguously
+  // Write sample data + directory to the bank file (wb).
+  // The song file (w) gets only the sample directory for reference.
   {
-    // first, calculate total sample data size
     size_t totalSampleSize=0;
     for (int i=0; i<e->song.sampleLen; i++) {
       DivSample* s=e->song.sample[i];
@@ -182,13 +184,13 @@ void DivExportSPUDump::run() {
 
     if (totalSampleSize>0) {
       // SPU RAM base address for samples (in 8-byte units)
-      // start at 0x1010 (after capture buffers, 0x1000 = 4096 bytes = 512 8-byte units)
+      // start at 0x1010 (after capture buffers)
       unsigned int baseAddr8=0x202; // 0x1010 / 8
 
-      // sample data packet: base address word + raw ADPCM data
+      // sample data packet -> bank file
       unsigned int dataWords=1+(unsigned int)((totalSampleSize+3)/4);
-      writePacketHeader(w,SPUD_PKT_SAMPLE_DATA,dataWords);
-      w->writeI(baseAddr8);
+      writePacketHeader(wb,SPUD_PKT_SAMPLE_DATA,dataWords);
+      wb->writeI(baseAddr8);
 
       // track per-sample offsets for directory
       std::vector<unsigned int> sampleAddr8;
@@ -212,7 +214,7 @@ void DivExportSPUDump::run() {
             sampleHasLoop.push_back(false);
           }
 
-          w->write(s->dataPS1SPU,s->lengthPS1SPU);
+          wb->write(s->dataPS1SPU,s->lengthPS1SPU);
           curAddr8+=(unsigned int)(s->lengthPS1SPU/8);
         } else {
           sampleAddr8.push_back(0);
@@ -223,22 +225,24 @@ void DivExportSPUDump::run() {
       }
 
       // pad to 4-byte alignment
-      size_t written=4+totalSampleSize; // base addr word + data
+      size_t written=4+totalSampleSize;
       while (written%4!=0) {
-        w->writeC(0);
+        wb->writeC(0);
         written++;
       }
 
-      // sample directory packet
+      // sample directory -> both files
+      // (bank file for SPD_LoadEx, song file for SPD_PlaySoundEffect reference)
       int sampleCount=(int)sampleAddr8.size();
-      writePacketHeader(w,SPUD_PKT_SAMPLE_DIR,1+(unsigned int)(sampleCount*2));
-      w->writeI((unsigned int)sampleCount);
-      for (int i=0; i<sampleCount; i++) {
-        // word 0: addr8 (upper 16) | len8 (lower 16)
-        w->writeI((sampleAddr8[i]<<16)|(sampleLen8[i]&0xffff));
-        // word 1: loopAddr8 (upper 16) | flags (lower 16)
-        unsigned int flags=sampleHasLoop[i]?1:0;
-        w->writeI((sampleLoopAddr8[i]<<16)|(flags&0xffff));
+      for (int f=0; f<2; f++) {
+        SafeWriter* target=(f==0)?wb:w;
+        writePacketHeader(target,SPUD_PKT_SAMPLE_DIR,1+(unsigned int)(sampleCount*2));
+        target->writeI((unsigned int)sampleCount);
+        for (int i=0; i<sampleCount; i++) {
+          target->writeI((sampleAddr8[i]<<16)|(sampleLen8[i]&0xffff));
+          unsigned int flags=sampleHasLoop[i]?1:0;
+          target->writeI((sampleLoopAddr8[i]<<16)|(flags&0xffff));
+        }
       }
     }
   }
@@ -437,6 +441,7 @@ void DivExportSPUDump::run() {
   logAppend("finished!");
 
   output.push_back(DivROMExportOutput("out.spudump",w));
+  output.push_back(DivROMExportOutput("out.spubank",wb));
   running=false;
 }
 
