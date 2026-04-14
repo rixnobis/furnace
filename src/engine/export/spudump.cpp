@@ -354,23 +354,29 @@ void DivExportSPUDump::run() {
 
       e->disCont[SPU].dispatch->toggleRegisterDump(true);
 
+      // Virtual register for inline wait within a register write packet
+      #define SPUD_VREG_WAIT 0xEFFF
+
       bool done=false;
       int lastOrder=-1;
       int patternIdx=0;
       unsigned int pendingWait=0;
+      // accumulate all writes for current pattern as one big packet
+      std::vector<unsigned int> patternWords;
 
       while (!done && !mustAbort) {
         int curOrder=e->curOrder;
 
         // detect pattern boundary
         if (curOrder!=lastOrder) {
-          // flush pending wait
-          if (pendingWait>0 && lastOrder>=0) {
-            writeWaitPacket(w,pendingWait);
-            pendingWait=0;
+          // flush previous pattern as a single register write packet
+          if (lastOrder>=0 && !patternWords.empty()) {
+            writePacketHeader(w,SPUD_PKT_REG_WRITE,(unsigned int)patternWords.size());
+            for (unsigned int word: patternWords) {
+              w->writeI(word);
+            }
+            patternWords.clear();
           }
-
-          // end previous pattern
           if (lastOrder>=0) {
             writeEmptyPacket(w,SPUD_PKT_END_PATTERN);
           }
@@ -378,15 +384,15 @@ void DivExportSPUDump::run() {
           // backfill pattern header with current file offset
           if (patternIdx<(int)patternHeaderOffsets.size()) {
             size_t curPos=w->tell();
-            w->seek(patternHeaderOffsets[patternIdx]+4,SEEK_SET); // skip packet header
+            w->seek(patternHeaderOffsets[patternIdx]+4,SEEK_SET);
             w->writeI((unsigned int)curPos);
             w->seek(curPos,SEEK_SET);
           }
 
           lastOrder=curOrder;
           patternIdx++;
+          pendingWait=0;
 
-          // update progress
           if (e->song.subsong[0]->ordersLen>0) {
             progress[0].amount=(float)curOrder/(float)e->song.subsong[0]->ordersLen;
           }
@@ -404,12 +410,26 @@ void DivExportSPUDump::run() {
         // collect register writes
         std::vector<DivRegWrite>& writes=e->disCont[SPU].dispatch->getRegisterWrites();
         if (!writes.empty()) {
-          // flush any pending wait before writing registers
+          // flush pending wait as inline virtual register before real writes
           if (pendingWait>0) {
-            writeWaitPacket(w,pendingWait);
+            patternWords.push_back(((unsigned int)SPUD_VREG_WAIT<<16)|(pendingWait&0xffff));
             pendingWait=0;
           }
-          writeRegWritePacket(w,writes,&insMacroMap);
+          // remap and append writes
+          for (DivRegWrite& wr: writes) {
+            unsigned int addr=wr.addr&0xffff;
+            unsigned int val=wr.val&0xffff;
+            if (addr>=0xF000) {
+              int insIdx=addr&0x0FFF;
+              auto it=insMacroMap.find(insIdx);
+              if (it!=insMacroMap.end()) {
+                addr=0xF000|it->second;
+              } else {
+                continue;
+              }
+            }
+            patternWords.push_back((addr<<16)|val);
+          }
         }
         writes.clear();
 
@@ -420,9 +440,15 @@ void DivExportSPUDump::run() {
         }
       }
 
-      // flush final wait and end last pattern
+      // flush final pattern
       if (pendingWait>0) {
-        writeWaitPacket(w,pendingWait);
+        patternWords.push_back(((unsigned int)SPUD_VREG_WAIT<<16)|(pendingWait&0xffff));
+      }
+      if (!patternWords.empty()) {
+        writePacketHeader(w,SPUD_PKT_REG_WRITE,(unsigned int)patternWords.size());
+        for (unsigned int word: patternWords) {
+          w->writeI(word);
+        }
       }
       if (lastOrder>=0) {
         writeEmptyPacket(w,SPUD_PKT_END_PATTERN);
