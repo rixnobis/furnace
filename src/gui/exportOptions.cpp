@@ -491,6 +491,27 @@ void FurnaceGUI::drawExportROM(bool onWindow) {
       }
       break;
     }
+    case DIV_ROM_SPUDUMP: {
+      bool spuExportLoop=romConfig.getBool("loop",true);
+      int spuExportVoiceCount=romConfig.getInt("voiceCount",24);
+
+      if (ImGui::Checkbox(_("Loop"),&spuExportLoop)) {
+        altered=true;
+      }
+      if (ImGui::InputInt(_("Voice count"),&spuExportVoiceCount,1,4)) {
+        if (spuExportVoiceCount<1) spuExportVoiceCount=1;
+        if (spuExportVoiceCount>24) spuExportVoiceCount=24;
+        altered=true;
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s",_("Voices above this count are left free for sound effects.\nThe stream will only use voices 0 through N-1."));
+      }
+      if (altered) {
+        romConfig.set("loop",spuExportLoop);
+        romConfig.set("voiceCount",spuExportVoiceCount);
+      }
+      break;
+    }
     case DIV_ROM_ABSTRACT:
       ImGui::TextWrapped("%s",_("select a target from the menu at the top of this dialog."));
       break;
