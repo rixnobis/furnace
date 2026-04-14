@@ -277,15 +277,26 @@ void DivPlatformSNES::tick(bool sysTick) {
             v->env_mode=SPC_DSP::env_attack;
             v->env=0;
             // emit SPU register writes for export
-            // start address in 8-byte units
-            unsigned int startAddr8=sampleOff[chan[i].sample]/8;
-            ps1ChWrite(i,PS1_REG_START_ADDR,startAddr8&0xffff);
-            // loop address is set automatically by ADPCM block flags in sample data
-            // emit macro invocation (virtual write: offset >= 0xF000)
-            // the exporter maps instrument indices to macro indices
             if (dumpWrites && chan[i].insChanged) {
+              // macro invocation covers START_ADDR + ADSR, so emit invocation only
               addWrite(0xF000|(chan[i].ins&0x0FFF),i);
+              // pre-populate cache to suppress redundant raw writes from writeEnv()
+              // the macro already covers START_ADDR + ADSR
+              unsigned int startAddr8=sampleOff[chan[i].sample]/8;
+              unsigned short regBase=i*0x10;
+              ps1RegCache[regBase+PS1_REG_START_ADDR]=startAddr8&0xffff;
+              // compute ADSR values that writeEnv() will try to write
+              int attackShift=(chan[i].state.a>=15)?0:(15-chan[i].state.a);
+              unsigned short adsrLo=(attackShift&0x1f)|((chan[i].state.d&0xf)<<6);
+              unsigned short adsrHi=((chan[i].state.s&0x7)<<1)|((chan[i].state.r&0x1f)<<4);
+              ps1RegCache[regBase+PS1_REG_ADSR_LO]=adsrLo;
+              ps1RegCache[regBase+PS1_REG_ADSR_HI]=adsrHi;
+            } else {
+              // no macro - emit raw start address
+              unsigned int startAddr8=sampleOff[chan[i].sample]/8;
+              ps1ChWrite(i,PS1_REG_START_ADDR,startAddr8&0xffff);
             }
+            // loop address is set automatically by ADPCM block flags in sample data
           }
           kon|=(1<<i);
           koff|=(1<<i);
