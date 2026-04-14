@@ -369,9 +369,15 @@ void DivPlatformSNES::tick(bool sysTick) {
       rWriteDelay(0x5c,koff,8);
     }
   }
-  if (writeControl && !ps1Mode) {
-    unsigned char control=(noiseFreq&0x1f)|(echoOn?0:0x20);
-    rWrite(0x6c,control);
+  if (writeControl) {
+    if (ps1Mode) {
+      // PS1 SPU noise frequency is in SPUCNT register bits 8-13
+      // but for the dump we emit it as a dedicated virtual register
+      ps1Write(PS1_REG_NOISE_FREQ,noiseFreq&0x1f);
+    } else {
+      unsigned char control=(noiseFreq&0x1f)|(echoOn?0:0x20);
+      rWrite(0x6c,control);
+    }
     writeControl=false;
   }
   if (writeNoise) {
@@ -409,8 +415,16 @@ void DivPlatformSNES::tick(bool sysTick) {
     writeEcho=false;
   }
   if (writeDryVol) {
-    rWrite(0x0c,dryVolL);
-    rWrite(0x1c,dryVolR);
+    if (ps1Mode) {
+      // PS1 main volume: 16-bit signed, 0x3FFF = max
+      int mvL=(dryVolL*0x3FFF)/127;
+      int mvR=(dryVolR*0x3FFF)/127;
+      ps1Write(PS1_REG_MAIN_VOL_L,mvL&0xffff);
+      ps1Write(PS1_REG_MAIN_VOL_R,mvR&0xffff);
+    } else {
+      rWrite(0x0c,dryVolL);
+      rWrite(0x1c,dryVolR);
+    }
     writeDryVol=false;
   }
   for (int i=0; i<chanCount; i++) {
