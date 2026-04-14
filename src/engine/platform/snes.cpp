@@ -32,6 +32,36 @@
 #define sampleTableAddr(c) (sampleTableBase+(c)*4)
 #define waveTableAddr(c) (sampleTableBase+8*4+(c)*9*16)
 
+// PS1 SPU register write - only records for dump, does not queue for SNES DSP
+// addresses are offsets from SPU base (0x1F801C00)
+#define ps1Write(a,v) if (!skipRegisterWrites && dumpWrites) {addWrite(a,v);}
+#define ps1ChWrite(c,a,v) {ps1Write((a)+(c)*0x10,v)}
+
+// PS1 SPU register offsets (per-voice, offset from voice base = ch*0x10)
+#define PS1_REG_VOL_L      0x00
+#define PS1_REG_VOL_R      0x02
+#define PS1_REG_PITCH      0x04
+#define PS1_REG_START_ADDR 0x06
+#define PS1_REG_ADSR_LO    0x08
+#define PS1_REG_ADSR_HI    0x0A
+#define PS1_REG_ADSR_VOL   0x0C
+#define PS1_REG_LOOP_ADDR  0x0E
+
+// PS1 SPU global register offsets (from 0x1F801C00)
+#define PS1_REG_MAIN_VOL_L 0x180
+#define PS1_REG_MAIN_VOL_R 0x182
+#define PS1_REG_KEY_ON_LO  0x188
+#define PS1_REG_KEY_ON_HI  0x18A
+#define PS1_REG_KEY_OFF_LO 0x18C
+#define PS1_REG_KEY_OFF_HI 0x18E
+#define PS1_REG_PMOD_LO    0x190
+#define PS1_REG_PMOD_HI    0x192
+#define PS1_REG_NOISE_LO   0x194
+#define PS1_REG_NOISE_HI   0x196
+#define PS1_REG_REVERB_LO  0x198
+#define PS1_REG_REVERB_HI  0x19A
+#define PS1_REG_NOISE_FREQ 0x19C
+
 const char* regCheatSheetSNESDSP[]={
   "VxVOLL", "x0",
   "VxVOLR", "x1",
@@ -237,6 +267,16 @@ void DivPlatformSNES::tick(bool sysTick) {
             v->kon_delay=5;
             v->env_mode=SPC_DSP::env_attack;
             v->env=0;
+            // emit SPU register writes for export
+            // start address in 8-byte units
+            unsigned int startAddr8=sampleOff[chan[i].sample]/8;
+            ps1ChWrite(i,PS1_REG_START_ADDR,startAddr8&0xffff);
+            // loop address
+            DivSample* sa=parent->getSample(chan[i].sample);
+            if (sa->isLoopable()) {
+              unsigned int loopAddr8=(sampleOff[chan[i].sample]+((sa->loopStart/28)*16))/8;
+              ps1ChWrite(i,PS1_REG_LOOP_ADDR,loopAddr8&0xffff);
+            }
           }
           kon|=(1<<i);
           koff|=(1<<i);
@@ -278,45 +318,66 @@ void DivPlatformSNES::tick(bool sysTick) {
         chan[i].keyOff=false;
       }
       if (chan[i].freqChanged) {
-        chWrite(i,2,chan[i].freq&0xff);
-        chWrite(i,3,chan[i].freq>>8);
+        if (ps1Mode) {
+          // PS1 SPU pitch: 4.12 fixed-point, 0x1000 = 44100Hz
+          ps1ChWrite(i,PS1_REG_PITCH,chan[i].freq&0xffff);
+        } else {
+          chWrite(i,2,chan[i].freq&0xff);
+          chWrite(i,3,chan[i].freq>>8);
+        }
         chan[i].freqChanged=false;
       }
     }
   }
   if (koff!=0) {
-    // TODO: improve
-    if (antiClick) {
-      for (int i=0; i<8; i++) {
-        if (koff&(1<<i)) {
-          chWrite(i,5,0);
-          chWrite(i,7,0x9f);
-          chan[i].shallWriteEnv=true;
+    if (ps1Mode) {
+      // PS1 key-off: write to KEY_OFF register (32-bit split across two 16-bit regs)
+      ps1Write(PS1_REG_KEY_OFF_LO,koff&0xffff);
+      ps1Write(PS1_REG_KEY_OFF_HI,(koff>>16)&0xffff);
+    } else {
+      // TODO: improve
+      if (antiClick) {
+        for (int i=0; i<8; i++) {
+          if (koff&(1<<i)) {
+            chWrite(i,5,0);
+            chWrite(i,7,0x9f);
+            chan[i].shallWriteEnv=true;
+          }
         }
+        rWriteDelay(0x7e,0,64);
       }
-      rWriteDelay(0x7e,0,64);
+      rWriteDelay(0x5c,koff,8);
     }
-    rWriteDelay(0x5c,koff,8);
   }
-  if (writeControl) {
+  if (writeControl && !ps1Mode) {
     unsigned char control=(noiseFreq&0x1f)|(echoOn?0:0x20);
     rWrite(0x6c,control);
     writeControl=false;
   }
-  if (writeNoise && !ps1Mode) {
-    unsigned char noiseBits=0;
+  if (writeNoise) {
+    unsigned int noiseBits=0;
     for (int i=0; i<chanCount; i++) {
       if (chan[i].noise) noiseBits|=(1<<i);
     }
-    rWrite(0x3d,noiseBits);
+    if (ps1Mode) {
+      ps1Write(PS1_REG_NOISE_LO,noiseBits&0xffff);
+      ps1Write(PS1_REG_NOISE_HI,(noiseBits>>16)&0xffff);
+    } else {
+      rWrite(0x3d,noiseBits&0xff);
+    }
     writeNoise=false;
   }
-  if (writePitchMod && !ps1Mode) {
-    unsigned char pitchModBits=0;
+  if (writePitchMod) {
+    unsigned int pitchModBits=0;
     for (int i=0; i<chanCount; i++) {
       if (chan[i].pitchMod) pitchModBits|=(1<<i);
     }
-    rWrite(0x2d,pitchModBits);
+    if (ps1Mode) {
+      ps1Write(PS1_REG_PMOD_LO,pitchModBits&0xffff);
+      ps1Write(PS1_REG_PMOD_HI,(pitchModBits>>16)&0xffff);
+    } else {
+      rWrite(0x2d,pitchModBits&0xff);
+    }
     writePitchMod=false;
   }
   if (writeEcho && !ps1Mode) {
@@ -348,7 +409,12 @@ void DivPlatformSNES::tick(bool sysTick) {
     }
   }
   if (kon!=0) {
-    rWrite(0x4c,kon);
+    if (ps1Mode) {
+      ps1Write(PS1_REG_KEY_ON_LO,kon&0xffff);
+      ps1Write(PS1_REG_KEY_ON_HI,(kon>>16)&0xffff);
+    } else {
+      rWrite(0x4c,kon);
+    }
   }
 }
 
@@ -666,9 +732,21 @@ void DivPlatformSNES::writeOutVol(int ch) {
     if (chan[ch].invertR) outR=-outR;
   }
   if (ps1Mode) {
-    // PS1 mode: store volume in voice output directly
-    // The DSP's runPS1Voice reads voice->out for the platform to handle vol/pan
-    // For now we just store it - the acquire loop picks it up
+    // PS1 SPU: voice volume registers are 16-bit signed
+    // scale to SPU range (0x0000-0x3FFF)
+    int spuVolL=(outL*0x3FFF)/127;
+    int spuVolR=(outR*0x3FFF)/127;
+    if (spuVolL>0x3FFF) spuVolL=0x3FFF;
+    if (spuVolL<-0x3FFF) spuVolL=-0x3FFF;
+    if (spuVolR>0x3FFF) spuVolR=0x3FFF;
+    if (spuVolR<-0x3FFF) spuVolR=-0x3FFF;
+    // set on DSP voice for playback
+    SPC_DSP::voice_t* v=const_cast<SPC_DSP::voice_t*>(dsp.get_voice(ch));
+    v->out[0]=spuVolL>>7; // scale for DSP output mixing
+    v->out[1]=spuVolR>>7;
+    // emit register writes for export
+    ps1ChWrite(ch,PS1_REG_VOL_L,spuVolL&0xffff);
+    ps1ChWrite(ch,PS1_REG_VOL_R,spuVolR&0xffff);
     return;
   }
   chWrite(ch,0,outL);
@@ -677,11 +755,36 @@ void DivPlatformSNES::writeOutVol(int ch) {
 
 void DivPlatformSNES::writeEnv(int ch) {
   if (ps1Mode) {
-    // PS1 mode: always ADSR, write directly to DSP voice state
-    // For now, the envelope is handled by the SPC_DSP's run_envelope()
-    // which reads from the SNES register layout. In PS1 mode, we set
-    // the ADSR parameters directly on the voice.
-    // TODO: proper PS1 ADSR register mapping when we have full register emulation
+    // PS1 SPU ADSR register format:
+    // ADSR_LO (0x08): sustain_mode:1 | sustain_dir:1 | sustain_shift:5 | decay_shift:4 | attack_mode:1 | attack_shift:5 (but we use simplified mapping)
+    // ADSR_HI (0x0A): sustain_level:4 | release_mode:1 | release_shift:5 | pad:6
+    //
+    // Simplified mapping from Furnace ADSR params to PS1 registers:
+    // Attack: a (0-15) -> attack_shift = 15-a, attack_mode = 0 (linear)
+    // Decay: d (0-7) -> decay_shift = d
+    // Sustain level: s (0-7) -> sustain_level = s<<1 (map 0-7 to 0-14 range)
+    // Release: r (0-31) -> release_shift = r, release_mode = 0 (linear)
+    unsigned short adsrLo=0;
+    unsigned short adsrHi=0;
+
+    // attack: shift in bits 0-4, mode in bit 5
+    int attackShift=(chan[ch].state.a>=15)?0:(15-chan[ch].state.a);
+    adsrLo|=(attackShift&0x1f);
+    // decay: shift in bits 6-9
+    adsrLo|=((chan[ch].state.d&0xf)<<6);
+    // sustain: shift in bits 10-14, dir in bit 15 (0=decrease), mode in bit 14 (0=linear)
+    int sustainShift=chan[ch].state.r; // reuse r for sustain rate in simplified model
+    adsrLo|=((sustainShift&0x1f)<<10);
+
+    // sustain level in bits 0-3 of high word
+    adsrHi|=((chan[ch].state.s&0x7)<<1);
+    // release: shift in bits 4-8
+    int releaseShift=chan[ch].state.r;
+    adsrHi|=((releaseShift&0x1f)<<4);
+
+    // emit register writes for export
+    ps1ChWrite(ch,PS1_REG_ADSR_LO,adsrLo);
+    ps1ChWrite(ch,PS1_REG_ADSR_HI,adsrHi);
     return;
   }
   if (chan[ch].state.useEnv) {
