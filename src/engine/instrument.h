@@ -100,6 +100,7 @@ enum DivInstrumentType: unsigned short {
   DIV_INS_SUPERVISION=64,
   DIV_INS_UPD1771C=65,
   DIV_INS_SID3=66,
+  DIV_INS_PS1=67,
   DIV_INS_MAX,
   DIV_INS_NULL
 };
@@ -847,6 +848,21 @@ struct DivInstrumentSNES {
     d2(0) {}
 };
 
+struct DivInstrumentPS1 {
+  unsigned char a, d, s, r; // Attack 0-15, Decay 0-7, Sustain 0-7, Release 0-31
+
+  bool operator==(const DivInstrumentPS1& other);
+  bool operator!=(const DivInstrumentPS1& other) {
+    return !(*this==other);
+  }
+
+  DivInstrumentPS1():
+    a(15),
+    d(7),
+    s(7),
+    r(0) {}
+};
+
 // ESFM operator structure:
 // - DELAY, OUT, MOD, L, R, NOISE
 //   - Virtual: CT, DT, FIXED
@@ -1043,6 +1059,7 @@ struct DivInstrumentPOD {
   DivInstrumentSoundUnit su;
   DivInstrumentES5506 es5506;
   DivInstrumentSNES snes;
+  DivInstrumentPS1 ps1;
   DivInstrumentESFM esfm;
   DivInstrumentPowerNoise powernoise;
   DivInstrumentSID2 sid2;
@@ -1148,6 +1165,7 @@ struct DivInstrument: DivInstrumentPOD {
   void writeFeatureOx(SafeWriter* w, int op);
   void writeFeatureLD(SafeWriter* w);
   void writeFeatureSN(SafeWriter* w);
+  void writeFeatureP1(SafeWriter* w);
   void writeFeatureN1(SafeWriter* w);
   void writeFeatureFD(SafeWriter* w);
   void writeFeatureWS(SafeWriter* w);
@@ -1172,6 +1190,7 @@ struct DivInstrument: DivInstrumentPOD {
   void readFeatureOx(SafeReader& reader, int op, short version);
   void readFeatureLD(SafeReader& reader, short version);
   void readFeatureSN(SafeReader& reader, short version);
+  void readFeatureP1(SafeReader& reader, short version);
   void readFeatureN1(SafeReader& reader, short version);
   void readFeatureFD(SafeReader& reader, short version);
   void readFeatureWS(SafeReader& reader, short version);

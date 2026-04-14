@@ -2745,7 +2745,7 @@ void DivEngine::registerSystems() {
         fmt::sprintf(_("CH%d"),ch+1),
         fmt::sprintf("C%02d",ch),
         DIV_CH_PCM,
-        DIV_INS_SNES,
+        DIV_INS_PS1,
         DIV_INS_AMIGA
       );
     }),

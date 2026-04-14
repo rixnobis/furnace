@@ -783,6 +783,15 @@ bool DivInstrumentSNES::operator==(const DivInstrumentSNES& other) {
   );
 }
 
+bool DivInstrumentPS1::operator==(const DivInstrumentPS1& other) {
+  return (
+    _C(a) &&
+    _C(d) &&
+    _C(s) &&
+    _C(r)
+  );
+}
+
 bool DivInstrumentESFM::operator==(const DivInstrumentESFM& other) {
   return (
     _C(noise) &&
@@ -1379,6 +1388,15 @@ void DivInstrument::writeFeatureSN(SafeWriter* w) {
   FEATURE_END;
 }
 
+void DivInstrument::writeFeatureP1(SafeWriter* w) {
+  FEATURE_BEGIN("P1");
+
+  w->writeC(((ps1.d&7)<<4)|(ps1.a&15));
+  w->writeC(((ps1.s&7)<<5)|(ps1.r&31));
+
+  FEATURE_END;
+}
+
 void DivInstrument::writeFeatureN1(SafeWriter* w) {
   FEATURE_BEGIN("N1");
 
@@ -1746,6 +1764,7 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
   bool featureOx[4];
   bool featureLD=false;
   bool featureSN=false;
+  bool featureP1=false;
   bool featureN1=false;
   bool featureFD=false;
   bool featureWS=false;
@@ -1885,6 +1904,11 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
         featureSN=true;
         checkForWL=true;
         if (ws.enabled) featureWS=true;
+        break;
+      case DIV_INS_PS1:
+        featureSM=true;
+        featureSL=true;
+        featureP1=true;
         break;
       case DIV_INS_SU:
         featureSM=true;
@@ -2042,6 +2066,9 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
     if (snes!=defaultIns.snes) {
       featureSN=true;
     }
+    if (ps1!=defaultIns.ps1) {
+      featureP1=true;
+    }
     if (n163!=defaultIns.n163) {
       featureN1=true;
     }
@@ -2188,6 +2215,9 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
   }
   if (featureSN) {
     writeFeatureSN(w);
+  }
+  if (featureP1) {
+    writeFeatureP1(w);
   }
   if (featureN1) {
     writeFeatureN1(w);
@@ -2798,6 +2828,20 @@ void DivInstrument::readFeatureSN(SafeReader& reader, short version) {
   READ_FEAT_END;
 }
 
+void DivInstrument::readFeatureP1(SafeReader& reader, short version) {
+  READ_FEAT_BEGIN;
+
+  unsigned char next=reader.readC();
+  ps1.d=(next>>4)&7;
+  ps1.a=next&15;
+
+  next=reader.readC();
+  ps1.s=(next>>5)&7;
+  ps1.r=next&31;
+
+  READ_FEAT_END;
+}
+
 void DivInstrument::readFeatureN1(SafeReader& reader, short version) {
   READ_FEAT_BEGIN;
 
@@ -3371,6 +3415,8 @@ DivDataErrors DivInstrument::readInsDataNew(SafeReader& reader, short version, b
       readFeatureLD(reader,version);
     } else if (memcmp(featCode,"SN",2)==0) { // SNES
       readFeatureSN(reader,version);
+    } else if (memcmp(featCode,"P1",2)==0) { // PS1 SPU
+      readFeatureP1(reader,version);
     } else if (memcmp(featCode,"N1",2)==0) { // Namco 163
       readFeatureN1(reader,version);
     } else if (memcmp(featCode,"FD",2)==0) { // FDS/VB

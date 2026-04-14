@@ -355,7 +355,7 @@ void DivPlatformSNES::tick(bool sysTick) {
 int DivPlatformSNES::dispatch(DivCommand c) {
   switch (c.cmd) {
     case DIV_CMD_NOTE_ON: {
-      DivInstrument* ins=parent->getIns(chan[c.chan].ins,DIV_INS_SNES);
+      DivInstrument* ins=parent->getIns(chan[c.chan].ins,ps1Mode?DIV_INS_PS1:DIV_INS_SNES);
       if (!ps1Mode && ins->amiga.useWave) {
         chan[c.chan].useWave=true;
         chan[c.chan].sampleNote=DIV_NOTE_NULL;
@@ -382,7 +382,18 @@ int DivPlatformSNES::dispatch(DivCommand c) {
         chan[c.chan].sample=-1;
       }
       if (chan[c.chan].insChanged) {
-        chan[c.chan].state=ins->snes;
+        if (ps1Mode) {
+          // map PS1 ADSR to SNES state (always envelope mode)
+          chan[c.chan].state.useEnv=true;
+          chan[c.chan].state.a=ins->ps1.a;
+          chan[c.chan].state.d=ins->ps1.d;
+          chan[c.chan].state.s=ins->ps1.s;
+          chan[c.chan].state.r=ins->ps1.r;
+          chan[c.chan].state.sus=0;
+          chan[c.chan].state.gainMode=DivInstrumentSNES::GAIN_MODE_DIRECT;
+        } else {
+          chan[c.chan].state=ins->snes;
+        }
       }
       chan[c.chan].active=true;
       if (chan[c.chan].insChanged || chan[c.chan].state.sus) {
@@ -488,7 +499,7 @@ int DivPlatformSNES::dispatch(DivCommand c) {
     }
     case DIV_CMD_PRE_PORTA:
       if (chan[c.chan].active && c.value2) {
-        if (parent->song.compatFlags.resetMacroOnPorta) chan[c.chan].macroInit(parent->getIns(chan[c.chan].ins,DIV_INS_SNES));
+        if (parent->song.compatFlags.resetMacroOnPorta) chan[c.chan].macroInit(parent->getIns(chan[c.chan].ins,ps1Mode?DIV_INS_PS1:DIV_INS_SNES));
       }
       chan[c.chan].inPorta=c.value;
       break;
