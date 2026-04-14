@@ -2248,10 +2248,37 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
         altered=true;
       } rightClickable
 
+      int reverbPreset=flags.getInt("ps1ReverbPreset",0);
+      int reverbVolL=flags.getInt("ps1ReverbVolL",0x3FFF);
+      int reverbVolR=flags.getInt("ps1ReverbVolR",0x3FFF);
+
+      ImGui::Separator();
+      ImGui::Text(_("Reverb:"));
+      if (ImGui::Combo(_("Preset##PS1Reverb"),&reverbPreset,
+        "Off\0Room\0Studio Small\0Studio Medium\0Studio Large\0"
+        "Hall\0Half Echo\0Space Echo\0Chaos Echo\0Delay\0")) {
+        altered=true;
+      }
+      if (reverbPreset>0) {
+        if (CWSliderInt(_("Reverb volume left"),&reverbVolL,0,0x3FFF)) {
+          if (reverbVolL<0) reverbVolL=0;
+          if (reverbVolL>0x3FFF) reverbVolL=0x3FFF;
+          altered=true;
+        } rightClickable
+        if (CWSliderInt(_("Reverb volume right"),&reverbVolR,0,0x3FFF)) {
+          if (reverbVolR<0) reverbVolR=0;
+          if (reverbVolR>0x3FFF) reverbVolR=0x3FFF;
+          altered=true;
+        } rightClickable
+      }
+
       if (altered) {
         e->lockSave([&]() {
           flags.set("volScaleL",127-vsL);
           flags.set("volScaleR",127-vsR);
+          flags.set("ps1ReverbPreset",reverbPreset);
+          flags.set("ps1ReverbVolL",reverbVolL);
+          flags.set("ps1ReverbVolR",reverbVolR);
         });
       }
 

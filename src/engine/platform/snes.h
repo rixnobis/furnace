@@ -61,6 +61,11 @@ class DivPlatformSNES: public DivDispatch {
   int chanCount;
   // PS1 register write cache - only emit when value changes
   unsigned short ps1RegCache[0x200]; // enough for all SPU registers
+  // PS1 reverb
+  int ps1ReverbPreset;
+  bool ps1ReverbEnabled;
+  short ps1ReverbVolL, ps1ReverbVolR;
+  bool writePS1Reverb;
   int globalVolL, globalVolR;
   unsigned char noiseFreq;
   signed char delay;

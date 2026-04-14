@@ -32,6 +32,73 @@
 #define sampleTableAddr(c) (sampleTableBase+(c)*4)
 #define waveTableAddr(c) (sampleTableBase+8*4+(c)*9*16)
 
+// PS1 reverb presets from psx-spx (32 register values each)
+// order: dAPF1,dAPF2,vIIR,vCOMB1,vCOMB2,vCOMB3,vCOMB4,vWALL,
+//        vAPF1,vAPF2,mLSAME,mRSAME,mLCOMB1,mRCOMB1,mLCOMB2,mRCOMB2,
+//        dLSAME,dRSAME,mLDIFF,mRDIFF,mLCOMB3,mRCOMB3,mLCOMB4,mRCOMB4,
+//        dLDIFF,dRDIFF,mLAPF1,mRAPF1,mLAPF2,mRAPF2,vLIN,vRIN
+static const short ps1ReverbPresets[][32]={
+  // 0: Off (size=0x10)
+  {0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,1,1,1,1,1,1,0,0,1,1,1,1,0,0},
+  // 1: Room (size=0x26C0)
+  {0x007D,0x005B,0x6D80,0x54B8,(short)0xBED0,0x0000,0x0000,(short)0xBA80,
+   0x5800,0x5300,0x04D6,0x0333,0x03F0,0x0227,0x0374,0x01EF,
+   0x0334,0x01B5,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+   0x0000,0x0000,0x01B4,0x0136,0x00B8,0x005C,(short)0x8000,(short)0x8000},
+  // 2: Studio Small (size=0x1F40)
+  {0x0033,0x0025,0x70F0,0x4FA8,(short)0xBCE0,0x4410,(short)0xC0F0,(short)0x9C00,
+   0x5280,0x4EC0,0x03E4,0x031B,0x03A4,0x02AF,0x0372,0x0266,
+   0x031C,0x025D,0x025C,0x018E,0x022F,0x0135,0x01D2,0x00B7,
+   0x018F,0x00B5,0x00B4,0x0080,0x004C,0x0026,(short)0x8000,(short)0x8000},
+  // 3: Studio Medium (size=0x4840)
+  {0x00B1,0x007F,0x70F0,0x4FA8,(short)0xBCE0,0x4510,(short)0xBEF0,(short)0xB4C0,
+   0x5280,0x4EC0,0x0904,0x076B,0x0824,0x065F,0x07A2,0x0616,
+   0x076C,0x05ED,0x05EC,0x042E,0x050F,0x0305,0x0462,0x02B7,
+   0x042F,0x0265,0x0264,0x01B2,0x0100,0x0080,(short)0x8000,(short)0x8000},
+  // 4: Studio Large (size=0x6FE0)
+  {0x00E3,0x00A9,0x6F60,0x4FA8,(short)0xBCE0,0x4510,(short)0xBEF0,(short)0xA680,
+   0x5680,0x52C0,0x0DFB,0x0B58,0x0D09,0x0A3C,0x0BD9,0x0973,
+   0x0B59,0x08DA,0x08D9,0x05E9,0x07EC,0x04B0,0x06EF,0x03D2,
+   0x05EA,0x031D,0x031C,0x0238,0x0154,0x00AA,(short)0x8000,(short)0x8000},
+  // 5: Hall (size=0xADE0)
+  {0x01A5,0x0139,0x6000,0x5000,0x4C00,(short)0xB800,(short)0xBC00,(short)0xC000,
+   0x6000,0x5C00,0x15BA,0x11BB,0x14C2,0x10BD,0x11BC,0x0DC1,
+   0x11C0,0x0DC3,0x0DC0,0x09C1,0x0BC4,0x07C1,0x0A00,0x06CD,
+   0x09C2,0x05C1,0x05C0,0x041A,0x0274,0x013A,(short)0x8000,(short)0x8000},
+  // 6: Half Echo (size=0x3C00)
+  {0x0017,0x0013,0x70F0,0x4FA8,(short)0xBCE0,0x4510,(short)0xBEF0,(short)0x8500,
+   0x5F80,0x54C0,0x0371,0x02AF,0x02E5,0x01DF,0x02B0,0x01D7,
+   0x0358,0x026A,0x01D6,0x011E,0x012D,0x00B1,0x011F,0x0059,
+   0x01A0,0x00E3,0x0058,0x0040,0x0028,0x0014,(short)0x8000,(short)0x8000},
+  // 7: Space Echo (size=0xF6C0)
+  {0x033D,0x0231,0x7E00,0x5000,(short)0xB400,(short)0xB000,0x4C00,(short)0xB000,
+   0x6000,0x5400,0x1ED6,0x1A31,0x1D14,0x183B,0x1BC2,0x16B2,
+   0x1A32,0x15EF,0x15EE,0x1055,0x1334,0x0F2D,0x11F6,0x0C5D,
+   0x1056,0x0AE1,0x0AE0,0x07A2,0x0464,0x0232,(short)0x8000,(short)0x8000},
+  // 8: Chaos Echo (size=0x18040)
+  {0x0001,0x0001,0x7FFF,0x7FFF,0x0000,0x0000,0x0000,(short)0x8100,
+   0x0000,0x0000,0x1FFF,0x0FFF,0x1005,0x0005,0x0000,0x0000,
+   0x1005,0x0005,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+   0x0000,0x0000,0x1004,0x1002,0x0004,0x0002,(short)0x8000,(short)0x8000},
+  // 9: Delay (size=0x18040)
+  {0x0001,0x0001,0x7FFF,0x7FFF,0x0000,0x0000,0x0000,0x0000,
+   0x0000,0x0000,0x1FFF,0x0FFF,0x1005,0x0005,0x0000,0x0000,
+   0x1005,0x0005,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+   0x0000,0x0000,0x1004,0x1002,0x0004,0x0002,(short)0x8000,(short)0x8000},
+};
+
+// reverb buffer sizes in bytes for each preset
+static const unsigned int ps1ReverbSizes[]={
+  0x10, 0x26C0, 0x1F40, 0x4840, 0x6FE0, 0xADE0, 0x3C00, 0xF6C0, 0x18040, 0x18040
+};
+
+static const char* ps1ReverbPresetNames[]={
+  "Off", "Room", "Studio Small", "Studio Medium", "Studio Large",
+  "Hall", "Half Echo", "Space Echo", "Chaos Echo", "Delay"
+};
+
+#define PS1_REVERB_PRESET_COUNT 10
+
 // PS1 SPU register write - cached, only emits when value changes
 // addresses are offsets from SPU base (0x1F801C00)
 #define ps1Write(a,v) { \
@@ -406,12 +473,22 @@ void DivPlatformSNES::tick(bool sysTick) {
     }
     writePitchMod=false;
   }
-  if (writeEcho && !ps1Mode) {
-    unsigned char echoBits=0;
+  if (writeEcho) {
+    unsigned int echoBits=0;
     for (int i=0; i<chanCount; i++) {
       if (chan[i].echo) echoBits|=(1<<i);
     }
-    rWrite(0x4d,echoBits);
+    if (ps1Mode) {
+      // update reverb voice mask in DSP
+      SPC_DSP::PS1Reverb rev=dsp.getPS1Reverb();
+      rev.voiceMask=echoBits;
+      dsp.setPS1Reverb(rev);
+      // emit for export
+      ps1Write(PS1_REG_REVERB_LO,echoBits&0xffff);
+      ps1Write(PS1_REG_REVERB_HI,(echoBits>>16)&0xffff);
+    } else {
+      rWrite(0x4d,echoBits&0xff);
+    }
     writeEcho=false;
   }
   if (writeDryVol) {
@@ -1120,6 +1197,33 @@ void DivPlatformSNES::reset() {
 
     initEcho();
   }
+
+  if (ps1Mode && ps1ReverbEnabled && ps1ReverbPreset>0 && ps1ReverbPreset<PS1_REVERB_PRESET_COUNT) {
+    // apply reverb preset to DSP
+    SPC_DSP::PS1Reverb rev;
+    const short* p=ps1ReverbPresets[ps1ReverbPreset];
+    rev.enabled=true;
+    rev.dAPF1=p[0]; rev.dAPF2=p[1];
+    rev.vIIR=p[2]; rev.vCOMB1=p[3]; rev.vCOMB2=p[4]; rev.vCOMB3=p[5]; rev.vCOMB4=p[6]; rev.vWALL=p[7];
+    rev.vAPF1=p[8]; rev.vAPF2=p[9];
+    rev.mLSAME=p[10]; rev.mRSAME=p[11]; rev.mLCOMB1=p[12]; rev.mRCOMB1=p[13]; rev.mLCOMB2=p[14]; rev.mRCOMB2=p[15];
+    rev.dLSAME=p[16]; rev.dRSAME=p[17]; rev.mLDIFF=p[18]; rev.mRDIFF=p[19]; rev.mLCOMB3=p[20]; rev.mRCOMB3=p[21]; rev.mLCOMB4=p[22]; rev.mRCOMB4=p[23];
+    rev.dLDIFF=p[24]; rev.dRDIFF=p[25]; rev.mLAPF1=p[26]; rev.mRAPF1=p[27]; rev.mLAPF2=p[28]; rev.mRAPF2=p[29];
+    rev.vLIN=p[30]; rev.vRIN=p[31];
+    rev.vLOUT=ps1ReverbVolL;
+    rev.vROUT=ps1ReverbVolR;
+    // reverb buffer at end of sample memory
+    unsigned int reverbSize=ps1ReverbSizes[ps1ReverbPreset];
+    rev.bufferBase=sampleMemSize-reverbSize;
+    rev.bufferAddr=rev.bufferBase;
+    rev.voiceMask=0; // per-voice enable set by echo flag
+    for (int i=0; i<chanCount; i++) {
+      if (chan[i].echo) rev.voiceMask|=(1<<i);
+    }
+    dsp.setPS1Reverb(rev);
+    // zero-fill reverb buffer
+    memset(&sampleMem[rev.bufferBase],0,reverbSize);
+  }
 }
 
 int DivPlatformSNES::getOutputCount() {
@@ -1374,6 +1478,14 @@ void DivPlatformSNES::setFlags(const DivConfig& flags) {
 
   interpolationOff=flags.getBool("interpolationOff",false);
   antiClick=flags.getBool("antiClick",true);
+
+  if (ps1Mode) {
+    ps1ReverbPreset=flags.getInt("ps1ReverbPreset",0);
+    ps1ReverbEnabled=(ps1ReverbPreset>0);
+    ps1ReverbVolL=flags.getInt("ps1ReverbVolL",0x3FFF);
+    ps1ReverbVolR=flags.getInt("ps1ReverbVolR",0x3FFF);
+    writePS1Reverb=true;
+  }
 }
 
 int DivPlatformSNES::init(DivEngine* p, int channels, int sugRate, const DivConfig& flags) {
