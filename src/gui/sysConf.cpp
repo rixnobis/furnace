@@ -2232,6 +2232,33 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
 
       break;
     }
+    case DIV_SYSTEM_PS1_SPU: {
+      int vsL=127-(flags.getInt("volScaleL",0)&127);
+      int vsR=127-(flags.getInt("volScaleR",0)&127);
+
+      ImGui::Text(_("Volume scale:"));
+      if (CWSliderInt(_("Left##VolScaleL"),&vsL,0,127)) {
+        if (vsL<0) vsL=0;
+        if (vsL>127) vsL=127;
+        altered=true;
+      } rightClickable
+      if (CWSliderInt(_("Right##VolScaleL"),&vsR,0,127)) {
+        if (vsR<0) vsR=0;
+        if (vsR>127) vsR=127;
+        altered=true;
+      } rightClickable
+
+      if (altered) {
+        e->lockSave([&]() {
+          flags.set("volScaleL",127-vsL);
+          flags.set("volScaleR",127-vsR);
+        });
+      }
+
+      supportsCustomRate=false;
+
+      break;
+    }
     case DIV_SYSTEM_MSM5232: {
       int detune=flags.getInt("detune",0);
       int vibSpeed=flags.getInt("vibSpeed",0);

@@ -287,6 +287,9 @@ const char* FurnaceGUI::getSystemPartNumber(DivSystem sys, DivConfig& flags) {
     case DIV_SYSTEM_UPD1771C:
       return "μPD1771C-017";
       break;
+    case DIV_SYSTEM_PS1_SPU:
+      return "CXD2922Q";
+      break;
     default:
       return FurnaceGUI::getSystemName(sys);
       break;
