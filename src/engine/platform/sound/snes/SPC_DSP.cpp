@@ -830,25 +830,70 @@ void SPC_DSP::run( int clocks_remain )
 void SPC_DSP::init( void* ram_64k )
 {
 	m.ram = (uint8_t*) ram_64k;
+	m.ps1_mode = false;
+	m.active_voice_count = voice_count;
+	m.ram_mask = 0xFFFF;
 	mute_voices( 0 );
 	disable_surround( false );
 	set_output( 0, 0 );
 	reset();
-	
+
 	#ifndef NDEBUG
 		// be sure this sign-extends
 		assert( (int16_t) 0x8000 == -0x8000 );
-		
+
 		// be sure right shift preserves sign
 		assert( (-1 >> 1) == -1 );
-		
+
 		// check clamp macro
 		int i;
 		i = +0x8000; CLAMP16( i ); assert( i == +0x7FFF );
 		i = -0x8001; CLAMP16( i ); assert( i == -0x8000 );
-		
+
 		blargg_verify_byte_order();
 	#endif
+}
+
+void SPC_DSP::initPS1( void* ram_512k )
+{
+	m.ram = (uint8_t*) ram_512k;
+	m.ps1_mode = true;
+	m.active_voice_count = ps1_voice_count;
+	m.ram_mask = 0x7FFFF;
+	mute_voices( 0 );
+	disable_surround( false );
+	set_output( 0, 0 );
+
+	// initialize voice state for all 24 voices
+	memset( m.regs, 0, sizeof m.regs );
+	memset( &m.regs [register_count], 0, offsetof (state_t,ram) - register_count );
+	for ( int i = ps1_voice_count; --i >= 0; )
+	{
+		voice_t* v = &m.voices [i];
+		v->brr_offset = 1;
+		v->vbit = 1 << i;
+		v->regs = NULL; // PS1 doesn't use the SNES register layout
+		v->env_mode = env_release;
+		v->env = 0;
+		v->hidden_env = 0;
+		v->kon_delay = 0;
+		v->buf_pos = 0;
+		v->interp_pos = 0;
+		v->brr_addr = 0;
+		v->interpolate = true;
+		v->out[0] = 0;
+		v->out[1] = 0;
+		memset( v->buf, 0, sizeof v->buf );
+	}
+
+	m.noise = 0x4000;
+	m.echo_hist_pos = m.echo_hist;
+	m.every_other_sample = 1;
+	m.echo_offset = 0;
+	m.phase = 0;
+	m.kon_check = false;
+	m.new_kon = 0;
+	init_counter();
 }
 
 void SPC_DSP::soft_reset_common()
@@ -891,6 +936,201 @@ void SPC_DSP::load( uint8_t const regs [register_count] )
 }
 
 void SPC_DSP::reset() { load( initial_regs ); }
+
+
+//// PS1 SPU ADPCM support (Furnace addition)
+
+// PS1 SPU ADPCM filter coefficients (fixed-point, divided by 64 in decode)
+static int const ps1SpuFilterCoeffs [5][2] = {
+	{  0,   0},
+	{ 60,   0},
+	{115, -52},
+	{ 98, -55},
+	{122, -60}
+};
+
+// PS1 SPU ADPCM block: 16 bytes = 2 header + 14 data = 28 samples
+// Byte 0: shift (bits 0-3) | filter (bits 4-7)
+// Byte 1: flags (bit 0=loop end, bit 1=loop repeat, bit 2=loop start)
+// Bytes 2-15: 28 nibbles packed 2 per byte (low nibble first)
+
+void SPC_DSP::decodePS1SpuAdpcm( voice_t* v )
+{
+	int const header = m.ram [v->brr_addr & m.ram_mask];
+	int shift = header & 0x0F;
+	int filter = (header >> 4) & 0x07;
+	if ( filter > 4 ) filter = 4;
+
+	// decode 4 samples at current offset within the 28-sample block
+	// brr_offset tracks position in data bytes (0-13), each byte = 2 samples
+	int dataAddr = (v->brr_addr + 2 + v->brr_offset) & m.ram_mask;
+	unsigned char dataByte = m.ram [dataAddr];
+
+	int* pos = &v->buf [v->buf_pos];
+	int const* coeffs = ps1SpuFilterCoeffs [filter];
+
+	// decode 2 samples from one byte (low nibble then high nibble)
+	for ( int n = 0; n < 2; n++ )
+	{
+		int nibble;
+		if ( n == 0 )
+			nibble = dataByte & 0x0F;
+		else
+			nibble = (dataByte >> 4) & 0x0F;
+
+		// sign extend
+		if ( nibble >= 8 ) nibble -= 16;
+
+		// apply shift
+		int s = (nibble << 12) & 0xFFFF;
+		if ( s & 0x8000 ) s |= 0xFFFF0000;
+		if ( shift <= 12 )
+			s >>= shift;
+		else
+			s = (s < 0) ? -1 : 0;
+
+		// apply IIR filter
+		int p1 = pos [brr_buf_size - 1];
+		int p2 = pos [brr_buf_size - 2];
+		s += (p1 * coeffs[0] + p2 * coeffs[1] + 32) >> 6;
+
+		CLAMP16( s );
+		pos [brr_buf_size] = pos [0] = s;
+		pos++;
+	}
+
+	v->buf_pos += 2;
+	if ( v->buf_pos >= brr_buf_size )
+		v->buf_pos = 0;
+
+	// advance to next data byte
+	v->brr_offset++;
+	if ( v->brr_offset >= 14 )
+	{
+		// finished this block, move to next
+		v->brr_offset = 0;
+
+		// check flags in byte 1
+		int flags = m.ram [(v->brr_addr + 1) & m.ram_mask];
+		if ( flags & 0x04 ) // loop start
+		{
+			// store loop address (equivalent to SPU repeat address)
+			v->t_envx_out = 1; // repurpose as "has loop start" marker
+		}
+		if ( flags & 0x01 ) // loop end
+		{
+			if ( flags & 0x02 ) // loop repeat
+			{
+				// jump back - for now use brr_addr stored at key-on as loop point
+				// the platform layer handles setting the loop address
+			}
+			else
+			{
+				// end + mute
+				v->env_mode = env_release;
+				v->env = 0;
+			}
+		}
+
+		v->brr_addr = (v->brr_addr + ps1_adpcm_block_size) & m.ram_mask;
+	}
+}
+
+void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut )
+{
+	if ( v->kon_delay )
+	{
+		v->kon_delay--;
+		if ( v->kon_delay == 0 )
+		{
+			v->env_mode = env_attack;
+			v->env = 0;
+			v->hidden_env = 0;
+			v->buf_pos = 0;
+			v->brr_offset = 0;
+			v->interp_pos = 0;
+			memset( v->buf, 0, sizeof v->buf );
+		}
+		return;
+	}
+
+	// decode ADPCM if we need more samples
+	// the pitch counter (interp_pos) advancing past 0x1000 means we need to decode
+	if ( v->env_mode != env_release || v->env > 0 )
+	{
+		// ensure buffer has decoded samples ahead of interp position
+		int neededPos = (v->interp_pos >> 12) + v->buf_pos;
+		// decode in pairs as needed
+		while ( v->brr_offset == 0 || neededPos >= v->buf_pos + 2 )
+		{
+			decodePS1SpuAdpcm( v );
+			if ( v->env == 0 && v->env_mode == env_release )
+				break;
+		}
+	}
+
+	// Gaussian interpolation (same table as SNES)
+	int output = interpolate( v );
+
+	// run envelope
+	run_envelope( v );
+
+	// apply envelope to output
+	output = (output * v->env) >> 11;
+	CLAMP16( output );
+
+	// check mute
+	if ( m.mute_mask & (1 << vIdx) )
+		output = 0;
+
+	// the platform layer writes volume/pan to regs - for PS1 we use a simpler model
+	// store raw output for the platform to handle volume/pan
+	v->out[0] = output;
+	v->out[1] = output;
+
+	mainOut[0] += output;
+	mainOut[1] += output;
+}
+
+void SPC_DSP::runPS1( int clocks )
+{
+	// PS1 SPU simplified processing: one stereo sample per call
+	// no cycle-accurate timing needed for tracker use
+
+	int mainOut[2] = {0, 0};
+
+	// process all 24 voices
+	for ( int i = 0; i < ps1_voice_count; i++ )
+	{
+		voice_t* v = &m.voices [i];
+		runPS1Voice( v, i, mainOut );
+	}
+
+	// advance noise LFSR (same logic as SNES)
+	run_counters();
+	{
+		int feedback = (m.noise << 13) ^ (m.noise << 14);
+		m.noise = (feedback & 0x4000) ^ (m.noise >> 1);
+	}
+
+	// no reverb in v1 - direct output
+
+	// clamp and write output
+	CLAMP16( mainOut[0] );
+	CLAMP16( mainOut[1] );
+
+	if ( m.out )
+	{
+		m.out [0] = mainOut[0];
+		m.out [1] = mainOut[1];
+		m.out += 2;
+		if ( m.out >= m.out_end )
+		{
+			check_kon();
+			m.out = m.out_begin; // wrap
+		}
+	}
+}
 
 
 //// State save/load

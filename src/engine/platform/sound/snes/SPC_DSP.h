@@ -1,4 +1,5 @@
 // Highly accurate SNES SPC-700 DSP emulator
+// Extended with PS1 SPU mode for Furnace tracker
 
 // snes_spc 0.9.0
 #ifndef SPC_DSP_H
@@ -47,6 +48,17 @@ public:
 	// a pair of samples is be generated.
 	void run( int clock_count );
 	
+// PS1 SPU mode (Furnace addition)
+
+	// Maximum voice count (24 for PS1, 8 for SNES)
+	enum { ps1_voice_count = 24 };
+
+	// Initialize DSP in PS1 SPU mode with 512K RAM
+	void initPS1( void* ram_512k );
+
+	// Run PS1 SPU for one sample pair (simplified, non-cycle-accurate)
+	void runPS1( int clocks );
+
 // Sound control
 
 	// Mutes voices corresponding to non-zero bits in mask (issues repeated KOFF events).
@@ -132,7 +144,9 @@ public:
   const voice_t* get_voice(int n);
 private:
 	enum { brr_block_size = 9 };
-	
+	enum { ps1_adpcm_block_size = 16 };
+	enum { ps1_samples_per_block = 28 };
+
 	struct state_t
 	{
 		uint8_t regs [register_count];
@@ -186,10 +200,13 @@ private:
 		int t_echo_out [2];
 		int t_echo_in  [2];
 		
-		voice_t voices [voice_count];
-		
+		voice_t voices [ps1_voice_count]; // sized to max (24 for PS1, only 8 used for SNES)
+
 		// non-emulation state
-		uint8_t* ram;   // 64K shared RAM between DSP and SMP
+		uint8_t* ram;   // 64K shared RAM between DSP and SMP (or 512K for PS1)
+		bool ps1_mode;  // true = PS1 SPU mode
+		int active_voice_count; // 8 for SNES, 24 for PS1
+		int ram_mask;   // 0xFFFF for SNES, 0x7FFFF for PS1
 		int mute_mask;
 		sample_t* out;
 		sample_t* out_end;
@@ -242,6 +259,11 @@ private:
 	void echo_30();
 	
 	void soft_reset_common();
+
+	// PS1 SPU ADPCM decoding
+	void decodePS1SpuAdpcm( voice_t* v );
+	// PS1 SPU per-voice processing (one sample)
+	void runPS1Voice( voice_t* v, int vIdx, int* mainOut );
 
 public:
     bool mute() { return m.regs[r_flg] & 0x40; }
@@ -297,7 +319,7 @@ inline bool SPC_DSP::check_kon()
 inline void SPC_DSP::get_voice_outputs( sample_t* outs )
 {
 	int i;
-	for ( i = 0; i < voice_count; i++ )
+	for ( i = 0; i < m.active_voice_count; i++ )
 	{
 		voice_t* v = &m.voices [i];
 		outs [i * 2] = v->out [0];
