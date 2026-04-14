@@ -281,6 +281,11 @@ void DivPlatformSNES::tick(bool sysTick) {
             unsigned int startAddr8=sampleOff[chan[i].sample]/8;
             ps1ChWrite(i,PS1_REG_START_ADDR,startAddr8&0xffff);
             // loop address is set automatically by ADPCM block flags in sample data
+            // emit macro invocation (virtual write: offset >= 0xF000)
+            // the exporter maps instrument indices to macro indices
+            if (dumpWrites && chan[i].insChanged) {
+              addWrite(0xF000|(chan[i].ins&0x0FFF),i);
+            }
           }
           kon|=(1<<i);
           koff|=(1<<i);

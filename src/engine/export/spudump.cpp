@@ -21,6 +21,7 @@
 #include "../engine.h"
 #include "../../ta-log.h"
 #include <thread>
+#include <map>
 
 // SPU dump packet types
 #define SPUD_PKT_REG_WRITE   0x00
@@ -31,6 +32,7 @@
 #define SPUD_PKT_ORDER_TABLE 0x10
 #define SPUD_PKT_PATTERN_HDR 0x11
 #define SPUD_PKT_SUBSONG_TBL 0x12
+#define SPUD_PKT_MACRO_DEF   0x13
 #define SPUD_PKT_SAMPLE_DIR  0x20
 #define SPUD_PKT_SAMPLE_DATA 0x21
 #define SPUD_PKT_TICK_RATE   0x30
@@ -77,11 +79,28 @@ static void writeWaitPacket(SafeWriter* w, unsigned int ticks) {
 
 // write a register write packet from a batch of writes
 // each write is encoded as (addr16 << 16) | val16
-static void writeRegWritePacket(SafeWriter* w, std::vector<DivRegWrite>& writes) {
+static void writeRegWritePacket(SafeWriter* w, std::vector<DivRegWrite>& writes, const std::map<int,int>* insMacroMap=NULL) {
   if (writes.empty()) return;
-  writePacketHeader(w,SPUD_PKT_REG_WRITE,(unsigned int)writes.size());
+  // pre-build output words, remapping macro invocations
+  std::vector<unsigned int> words;
+  words.reserve(writes.size());
   for (DivRegWrite& wr: writes) {
-    unsigned int word=((wr.addr&0xffff)<<16)|(wr.val&0xffff);
+    unsigned int addr=wr.addr&0xffff;
+    unsigned int val=wr.val&0xffff;
+    if (addr>=0xF000 && insMacroMap!=NULL) {
+      int insIdx=addr&0x0FFF;
+      auto it=insMacroMap->find(insIdx);
+      if (it!=insMacroMap->end()) {
+        addr=0xF000|it->second;
+      } else {
+        continue; // no macro for this instrument, skip
+      }
+    }
+    words.push_back((addr<<16)|val);
+  }
+  if (words.empty()) return;
+  writePacketHeader(w,SPUD_PKT_REG_WRITE,(unsigned int)words.size());
+  for (unsigned int word: words) {
     w->writeI(word);
   }
 }
@@ -224,7 +243,70 @@ void DivExportSPUDump::run() {
     }
   }
 
-  // Phase 5: order table
+  // Phase 5: macro definitions
+  // Build a macro for each instrument that maps to a set of voice-relative register writes.
+  // Voice-relative means offsets are from voice 0 (0x00); the player adds voice*0x10 at invocation.
+  struct MacroDef {
+    std::vector<unsigned int> writes; // each word: (offset16 << 16) | value16
+  };
+  std::vector<MacroDef> macroDefs;
+  // map instrument index -> macro index
+  std::map<int,int> insMacroMap;
+
+  for (int i=0; i<e->song.insLen; i++) {
+    DivInstrument* ins=e->song.ins[i];
+    if (ins->type!=DIV_INS_PS1) continue;
+
+    MacroDef md;
+    // ADSR registers (voice-relative offsets 0x08, 0x0A)
+    unsigned short adsrLo=0;
+    unsigned short adsrHi=0;
+    int attackShift=(ins->ps1.a>=15)?0:(15-ins->ps1.a);
+    adsrLo|=(attackShift&0x1f);
+    adsrLo|=((ins->ps1.d&0xf)<<6);
+    adsrHi|=((ins->ps1.s&0x7)<<1);
+    adsrHi|=((ins->ps1.r&0x1f)<<4);
+    md.writes.push_back((0x0008<<16)|(adsrLo&0xffff));
+    md.writes.push_back((0x000A<<16)|(adsrHi&0xffff));
+
+    // sample start address (voice-relative offset 0x06)
+    int sampleIdx=ins->amiga.initSample;
+    if (sampleIdx>=0 && sampleIdx<e->song.sampleLen) {
+      DivSample* s=e->song.sample[sampleIdx];
+      if (s->dataPS1SPU!=NULL && s->lengthPS1SPU>0) {
+        // find this sample's SPU RAM address from the sample directory we built earlier
+        // sampleOff is not available here, but we can compute from the directory
+        // use the same base address calculation as Phase 4
+        unsigned int baseAddr8=0x202;
+        unsigned int addr8=baseAddr8;
+        for (int j=0; j<sampleIdx; j++) {
+          DivSample* prev=e->song.sample[j];
+          if (prev->dataPS1SPU!=NULL && prev->lengthPS1SPU>0) {
+            addr8+=(unsigned int)(prev->lengthPS1SPU/8);
+          }
+        }
+        md.writes.push_back((0x0006<<16)|(addr8&0xffff));
+      }
+    }
+
+    if (!md.writes.empty()) {
+      int macroIdx=(int)macroDefs.size();
+      insMacroMap[i]=macroIdx;
+      macroDefs.push_back(md);
+    }
+  }
+
+  // emit macro definition packets
+  for (int i=0; i<(int)macroDefs.size(); i++) {
+    MacroDef& md=macroDefs[i];
+    writePacketHeader(w,SPUD_PKT_MACRO_DEF,1+(unsigned int)md.writes.size());
+    w->writeI((unsigned int)i); // macro index
+    for (unsigned int wr: md.writes) {
+      w->writeI(wr);
+    }
+  }
+
+  // Phase 6: order table
   {
     DivSubSong* sub=e->song.subsong[0];
     int orderLen=sub->ordersLen;
@@ -323,7 +405,7 @@ void DivExportSPUDump::run() {
             writeWaitPacket(w,pendingWait);
             pendingWait=0;
           }
-          writeRegWritePacket(w,writes);
+          writeRegWritePacket(w,writes,&insMacroMap);
         }
         writes.clear();
 
