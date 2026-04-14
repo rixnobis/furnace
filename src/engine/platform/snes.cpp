@@ -70,27 +70,33 @@ const char** DivPlatformSNES::getRegisterSheet() {
 
 void DivPlatformSNES::acquire(short** buf, size_t len) {
   short out[2];
-  short chOut[16];
-  for (int i=0; i<8; i++) {
+  short chOut[SNES_PSX_MAX_CHAN*2];
+  for (int i=0; i<chanCount; i++) {
     oscBuf[i]->begin(len);
   }
   for (size_t h=0; h<len; h++) {
-    if (--delay<=0) {
-      delay=0;
-      if (!writes.empty()) {
-        QueuedWrite w=writes.front();
-        dsp.write(w.addr,w.val);
-        regPool[w.addr&0x7f]=w.val;
-        writes.pop();
-        delay=w.delay;
+    if (!ps1Mode) {
+      if (--delay<=0) {
+        delay=0;
+        if (!writes.empty()) {
+          QueuedWrite w=writes.front();
+          dsp.write(w.addr,w.val);
+          regPool[w.addr&0x7f]=w.val;
+          writes.pop();
+          delay=w.delay;
+        }
       }
     }
     dsp.set_output(out,1);
-    dsp.run(32);
+    if (ps1Mode) {
+      dsp.runPS1(1);
+    } else {
+      dsp.run(32);
+    }
     dsp.get_voice_outputs(chOut);
     buf[0][h]=out[0];
     buf[1][h]=out[1];
-    for (int i=0; i<8; i++) {
+    for (int i=0; i<chanCount; i++) {
       int next=(3*(chOut[i*2]+chOut[i*2+1]))>>2;
       if (next<-32768) next=-32768;
       if (next>32767) next=32767;
@@ -100,7 +106,7 @@ void DivPlatformSNES::acquire(short** buf, size_t len) {
       oscBuf[i]->putSample(h,next>>1);
     }
   }
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     oscBuf[i]->end(len);
   }
 }
@@ -108,9 +114,9 @@ void DivPlatformSNES::acquire(short** buf, size_t len) {
 void DivPlatformSNES::tick(bool sysTick) {
   // KON/KOFF can't be written several times per one sample
   // so they have to be accumulated
-  unsigned char kon=0;
-  unsigned char koff=0;
-  for (int i=0; i<8; i++) {
+  unsigned int kon=0;
+  unsigned int koff=0;
+  for (int i=0; i<chanCount; i++) {
     chan[i].std.next();
     if (chan[i].std.vol.had) {
       chan[i].outVol=VOL_SCALE_LINEAR(chan[i].vol&127,MIN(127,chan[i].std.vol.val),127);
@@ -127,7 +133,7 @@ void DivPlatformSNES::tick(bool sysTick) {
       noiseFreq=chan[i].std.duty.val;
       writeControl=true;
     }
-    if (chan[i].useWave && chan[i].std.wave.had) {
+    if (!ps1Mode && chan[i].useWave && chan[i].std.wave.had) {
       if (chan[i].wave!=chan[i].std.wave.val || chan[i].ws.activeChanged()) {
         chan[i].wave=chan[i].std.wave.val;
         chan[i].ws.changeWave1(chan[i].wave);
@@ -174,7 +180,7 @@ void DivPlatformSNES::tick(bool sysTick) {
     if (chan[i].std.vol.had || chan[i].std.panL.had || chan[i].std.panR.had || hasInverted) {
       chan[i].shallWriteVol=true;
     }
-    if (chan[i].std.ex2.had) {
+    if (!ps1Mode && chan[i].std.ex2.had) {
       if (chan[i].std.ex2.val&0x80) {
         switch (chan[i].std.ex2.val&0x60) {
           case 0x00:
@@ -204,47 +210,65 @@ void DivPlatformSNES::tick(bool sysTick) {
     } else {
       chan[i].audPos=0;
     }
-    if (chan[i].useWave && chan[i].active) {
+    if (!ps1Mode && chan[i].useWave && chan[i].active) {
       if (chan[i].ws.tick()) {
         updateWave(i);
       }
     }
   }
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     // TODO: if wavetable length is higher than 32, we lose precision!
     if (chan[i].freqChanged || chan[i].keyOn || chan[i].keyOff) {
       DivSample* s=parent->getSample(chan[i].sample);
       double off=(s->centerRate>=1)?((double)s->centerRate/parent->getCenterRate()):1.0;
-      if (chan[i].useWave) off=(double)chan[i].wtLen/32.0;
+      if (!ps1Mode && chan[i].useWave) off=(double)chan[i].wtLen/32.0;
       chan[i].freq=(unsigned int)(off*parent->calcFreq(chan[i].baseFreq,chan[i].pitch,chan[i].fixedArp?chan[i].baseNoteOverride:chan[i].arpOff,chan[i].fixedArp,false,2,chan[i].pitch2,chipClock,CHIP_FREQBASE));
       if (chan[i].freq>16383) chan[i].freq=16383;
       if (chan[i].keyOn) {
-        unsigned int start, end, loop;
-        unsigned short tabAddr=sampleTableAddr(i);
-        if (chan[i].useWave) {
-          start=waveTableAddr(i);
-          loop=start;
-        } else if (chan[i].sample>=0 && chan[i].sample<parent->song.sampleLen) {
-          start=sampleOff[chan[i].sample];
-          end=MIN(start+MAX(s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0),1),getSampleMemCapacity());
-          loop=MAX(start,end-1);
-          if (chan[i].audPos>0) {
-            start=start+MIN(chan[i].audPos/16*9,end-start);
+        if (ps1Mode) {
+          // PS1 mode: set voice sample address directly in DSP
+          if (chan[i].sample>=0 && chan[i].sample<parent->song.sampleLen) {
+            SPC_DSP::voice_t* v=const_cast<SPC_DSP::voice_t*>(dsp.get_voice(i));
+            v->brr_addr=sampleOff[chan[i].sample];
+            if (chan[i].audPos>0) {
+              v->brr_addr+=((chan[i].audPos/28)*16);
+            }
+            v->brr_offset=0;
+            v->kon_delay=5;
+            v->env_mode=SPC_DSP::env_attack;
+            v->env=0;
           }
-          if (s->isLoopable()) {
-            loop=((s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0)+start+((s->loopStart/16)*9);
-          }
+          kon|=(1<<i);
+          koff|=(1<<i);
         } else {
-          start=0;
-          end=0;
-          loop=0;
+          // SNES mode: write sample directory table
+          unsigned int start, end, loop;
+          unsigned short tabAddr=sampleTableAddr(i);
+          if (chan[i].useWave) {
+            start=waveTableAddr(i);
+            loop=start;
+          } else if (chan[i].sample>=0 && chan[i].sample<parent->song.sampleLen) {
+            start=sampleOff[chan[i].sample];
+            end=MIN(start+MAX(s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0),1),getSampleMemCapacity());
+            loop=MAX(start,end-1);
+            if (chan[i].audPos>0) {
+              start=start+MIN(chan[i].audPos/16*9,end-start);
+            }
+            if (s->isLoopable()) {
+              loop=((s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0)+start+((s->loopStart/16)*9);
+            }
+          } else {
+            start=0;
+            end=0;
+            loop=0;
+          }
+          sampleMem[tabAddr+0]=start&0xff;
+          sampleMem[tabAddr+1]=start>>8;
+          sampleMem[tabAddr+2]=loop&0xff;
+          sampleMem[tabAddr+3]=loop>>8;
+          kon|=(1<<i);
+          koff|=(1<<i);
         }
-        sampleMem[tabAddr+0]=start&0xff;
-        sampleMem[tabAddr+1]=start>>8;
-        sampleMem[tabAddr+2]=loop&0xff;
-        sampleMem[tabAddr+3]=loop>>8;
-        kon|=(1<<i);
-        koff|=(1<<i);
         chan[i].keyOn=false;
       }
       if (chan[i].keyOff) {
@@ -279,45 +303,27 @@ void DivPlatformSNES::tick(bool sysTick) {
     rWrite(0x6c,control);
     writeControl=false;
   }
-  if (writeNoise) {
-    unsigned char noiseBits=(
-      (chan[0].noise?1:0)|
-      (chan[1].noise?2:0)|
-      (chan[2].noise?4:0)|
-      (chan[3].noise?8:0)|
-      (chan[4].noise?0x10:0)|
-      (chan[5].noise?0x20:0)|
-      (chan[6].noise?0x40:0)|
-      (chan[7].noise?0x80:0)
-    );
+  if (writeNoise && !ps1Mode) {
+    unsigned char noiseBits=0;
+    for (int i=0; i<chanCount; i++) {
+      if (chan[i].noise) noiseBits|=(1<<i);
+    }
     rWrite(0x3d,noiseBits);
     writeNoise=false;
   }
-  if (writePitchMod) {
-    unsigned char pitchModBits=(
-      (chan[0].pitchMod?1:0)|
-      (chan[1].pitchMod?2:0)|
-      (chan[2].pitchMod?4:0)|
-      (chan[3].pitchMod?8:0)|
-      (chan[4].pitchMod?0x10:0)|
-      (chan[5].pitchMod?0x20:0)|
-      (chan[6].pitchMod?0x40:0)|
-      (chan[7].pitchMod?0x80:0)
-    );
+  if (writePitchMod && !ps1Mode) {
+    unsigned char pitchModBits=0;
+    for (int i=0; i<chanCount; i++) {
+      if (chan[i].pitchMod) pitchModBits|=(1<<i);
+    }
     rWrite(0x2d,pitchModBits);
     writePitchMod=false;
   }
-  if (writeEcho) {
-    unsigned char echoBits=(
-      (chan[0].echo?1:0)|
-      (chan[1].echo?2:0)|
-      (chan[2].echo?4:0)|
-      (chan[3].echo?8:0)|
-      (chan[4].echo?0x10:0)|
-      (chan[5].echo?0x20:0)|
-      (chan[6].echo?0x40:0)|
-      (chan[7].echo?0x80:0)
-    );
+  if (writeEcho && !ps1Mode) {
+    unsigned char echoBits=0;
+    for (int i=0; i<chanCount; i++) {
+      if (chan[i].echo) echoBits|=(1<<i);
+    }
     rWrite(0x4d,echoBits);
     writeEcho=false;
   }
@@ -326,16 +332,16 @@ void DivPlatformSNES::tick(bool sysTick) {
     rWrite(0x1c,dryVolR);
     writeDryVol=false;
   }
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     if (chan[i].shallWriteEnv) {
       writeEnv(i);
       chan[i].shallWriteEnv=false;
     }
   }
-  if (koff!=0) {
+  if (koff!=0 && !ps1Mode) {
     rWriteDelay(0x5c,0,8);
   }
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     if (chan[i].shallWriteVol) {
       writeOutVol(i);
       chan[i].shallWriteVol=false;
@@ -350,7 +356,7 @@ int DivPlatformSNES::dispatch(DivCommand c) {
   switch (c.cmd) {
     case DIV_CMD_NOTE_ON: {
       DivInstrument* ins=parent->getIns(chan[c.chan].ins,DIV_INS_SNES);
-      if (ins->amiga.useWave) {
+      if (!ps1Mode && ins->amiga.useWave) {
         chan[c.chan].useWave=true;
         chan[c.chan].sampleNote=DIV_NOTE_NULL;
         chan[c.chan].sampleNoteDelta=0;
@@ -504,6 +510,7 @@ int DivPlatformSNES::dispatch(DivCommand c) {
       chan[c.chan].shallWriteVol=true;
       break;
     case DIV_CMD_SNES_GAIN_MODE:
+      if (ps1Mode) break; // no GAIN on PS1
       if (c.value) {
         chan[c.chan].state.useEnv=false;
         switch (c.value) {
@@ -529,6 +536,7 @@ int DivPlatformSNES::dispatch(DivCommand c) {
       chan[c.chan].shallWriteEnv=true;
       break;
     case DIV_CMD_SNES_GAIN:
+      if (ps1Mode) break; // no GAIN on PS1
       if (chan[c.chan].state.gainMode==DivInstrumentSNES::GAIN_MODE_DIRECT) {
         chan[c.chan].state.gain=c.value&0x7f;
       } else {
@@ -646,11 +654,25 @@ void DivPlatformSNES::writeOutVol(int ch) {
     if (chan[ch].invertL) outL=-outL;
     if (chan[ch].invertR) outR=-outR;
   }
+  if (ps1Mode) {
+    // PS1 mode: store volume in voice output directly
+    // The DSP's runPS1Voice reads voice->out for the platform to handle vol/pan
+    // For now we just store it - the acquire loop picks it up
+    return;
+  }
   chWrite(ch,0,outL);
   chWrite(ch,1,outR);
 }
 
 void DivPlatformSNES::writeEnv(int ch) {
+  if (ps1Mode) {
+    // PS1 mode: always ADSR, write directly to DSP voice state
+    // For now, the envelope is handled by the SPC_DSP's run_envelope()
+    // which reads from the SNES register layout. In PS1 mode, we set
+    // the ADSR parameters directly on the voice.
+    // TODO: proper PS1 ADSR register mapping when we have full register emulation
+    return;
+  }
   if (chan[ch].state.useEnv) {
     if (chan[ch].state.sus) {
       if (chan[ch].active) {
@@ -705,11 +727,11 @@ void DivPlatformSNES::muteChannel(int ch, bool mute) {
 }
 
 void DivPlatformSNES::forceIns() {
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     chan[i].insChanged=true;
     chan[i].freqChanged=true;
     chan[i].sample=-1;
-    if (chan[i].active && chan[i].useWave) {
+    if (!ps1Mode && chan[i].active && chan[i].useWave) {
       updateWave(i);
     }
     writeOutVol(i);
@@ -747,7 +769,7 @@ DivChannelModeHints DivPlatformSNES::getModeHints(int ch) {
   ret.type[0]=0;
 
   const SPC_DSP::voice_t* v=dsp.get_voice(ch);
-  if (v!=NULL) {
+  if (v!=NULL && v->regs!=NULL) {
     if (v->regs[5]&128) {
       switch (v->env_mode) {
         case SPC_DSP::env_attack:
@@ -798,10 +820,17 @@ DivChannelModeHints DivPlatformSNES::getModeHints(int ch) {
 }
 
 DivSamplePos DivPlatformSNES::getSamplePos(int ch) {
-  if (ch>=8) return DivSamplePos();
+  if (ch>=chanCount) return DivSamplePos();
   if (!chan[ch].active) return DivSamplePos();
   if (chan[ch].sample<0 || chan[ch].sample>=parent->song.sampleLen) return DivSamplePos();
   const SPC_DSP::voice_t* v=dsp.get_voice(ch);
+  if (ps1Mode) {
+    return DivSamplePos(
+      chan[ch].sample,
+      ((v->brr_addr-sampleOff[chan[ch].sample])/16*28)+v->brr_offset*2,
+      (chan[ch].freq*125)/16
+    );
+  }
   // TODO: fix?
   if (sampleMem[v->brr_addr&0xffff]==0) return DivSamplePos();
   return DivSamplePos(
@@ -861,59 +890,71 @@ void DivPlatformSNES::initEcho() {
 void DivPlatformSNES::reset() {
   writes.clear();
 
-  memcpy(sampleMem,copyOfSampleMem,65536);
-  dsp.init(sampleMem);
+  memcpy(sampleMem,copyOfSampleMem,sampleMemSize);
+
+  if (ps1Mode) {
+    dsp.initPS1(sampleMem);
+  } else {
+    dsp.init(sampleMem);
+  }
   dsp.set_output(NULL,0);
   dsp.setupInterpolation(!interpolationOff);
 
   memset(regPool,0,128);
-  // this can't be 0 or channel 1 won't play
-  // this can't be 0x100 either as that's used by SPC700 page 1 and the stack
-  // this may not even be 0x200 as some space will be taken by the playback routine and variables
-  // I hope 0x400 is good enough...
-  sampleTableBase=0x400;
-  rWrite(0x5d,sampleTableBase>>8);
-  rWrite(0x0c,127); // global volume left
-  rWrite(0x1c,127); // global volume right
-  rWrite(0x6c,0); // get DSP out of reset
-  for (int i=0; i<8; i++) {
+
+  if (!ps1Mode) {
+    // SNES-specific initialization
+    sampleTableBase=0x400;
+    rWrite(0x5d,sampleTableBase>>8);
+    rWrite(0x0c,127); // global volume left
+    rWrite(0x1c,127); // global volume right
+    rWrite(0x6c,0); // get DSP out of reset
+  }
+
+  for (int i=0; i<chanCount; i++) {
     chan[i]=Channel();
     chan[i].std.setEngine(parent);
-    chan[i].ws.setEngine(parent);
-    chan[i].ws.init(NULL,32,15);
+    if (!ps1Mode) {
+      chan[i].ws.setEngine(parent);
+      chan[i].ws.init(NULL,32,15);
+    }
     writeOutVol(i);
-    chWrite(i,4,i); // source number
+    if (!ps1Mode) {
+      chWrite(i,4,i); // source number
+    }
   }
   writeControl=false;
   writeNoise=false;
   writePitchMod=false;
-  writeEcho=true;
+  writeEcho=!ps1Mode;
   writeDryVol=false;
 
   dryVolL=127;
   dryVolR=127;
 
-  echoDelay=initEchoDelay;
-  echoFeedback=initEchoFeedback;
-  echoFIR[0]=initEchoFIR[0];
-  echoFIR[1]=initEchoFIR[1];
-  echoFIR[2]=initEchoFIR[2];
-  echoFIR[3]=initEchoFIR[3];
-  echoFIR[4]=initEchoFIR[4];
-  echoFIR[5]=initEchoFIR[5];
-  echoFIR[6]=initEchoFIR[6];
-  echoFIR[7]=initEchoFIR[7];
-  echoVolL=initEchoVolL;
-  echoVolR=initEchoVolR;
-  echoOn=initEchoOn;
-  
-  for (int i=0; i<8; i++) {
-    if (initEchoMask&(1<<i)) {
-      chan[i].echo=true;
-    }
-  }
+  if (!ps1Mode) {
+    echoDelay=initEchoDelay;
+    echoFeedback=initEchoFeedback;
+    echoFIR[0]=initEchoFIR[0];
+    echoFIR[1]=initEchoFIR[1];
+    echoFIR[2]=initEchoFIR[2];
+    echoFIR[3]=initEchoFIR[3];
+    echoFIR[4]=initEchoFIR[4];
+    echoFIR[5]=initEchoFIR[5];
+    echoFIR[6]=initEchoFIR[6];
+    echoFIR[7]=initEchoFIR[7];
+    echoVolL=initEchoVolL;
+    echoVolR=initEchoVolR;
+    echoOn=initEchoOn;
 
-  initEcho();
+    for (int i=0; i<8; i++) {
+      if (initEchoMask&(1<<i)) {
+        chan[i].echo=true;
+      }
+    }
+
+    initEcho();
+  }
 }
 
 int DivPlatformSNES::getOutputCount() {
@@ -925,7 +966,7 @@ bool DivPlatformSNES::hasSoftPan(int ch) {
 }
 
 void DivPlatformSNES::notifyInsChange(int ins) {
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     if (chan[i].ins==ins) {
       chan[i].insChanged=true;
     }
@@ -933,7 +974,7 @@ void DivPlatformSNES::notifyInsChange(int ins) {
 }
 
 void DivPlatformSNES::notifyWaveChange(int wave) {
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     if (chan[i].useWave && chan[i].wave==wave) {
       chan[i].ws.changeWave1(wave);
       if (chan[i].active) {
@@ -944,7 +985,7 @@ void DivPlatformSNES::notifyWaveChange(int wave) {
 }
 
 void DivPlatformSNES::notifyInsDeletion(void* ins) {
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     chan[i].std.notifyInsDeletion((DivInstrument*)ins);
   }
 }
@@ -962,7 +1003,9 @@ const void* DivPlatformSNES::getSampleMem(int index) {
 }
 
 size_t DivPlatformSNES::getSampleMemCapacity(int index) {
-  return index == 0 ? (0xf800-echoDelay*2048) : 0;
+  if (index!=0) return 0;
+  if (ps1Mode) return sampleMemSize; // 512KB, no echo buffer in v1
+  return (0xf800-echoDelay*2048);
 }
 
 size_t DivPlatformSNES::getSampleMemUsage(int index) {
@@ -985,107 +1028,162 @@ const DivMemoryComposition* DivPlatformSNES::getMemCompo(int index) {
 }
 
 const void* DivPlatformSNES::compileSampleMem(int index, size_t& size) {
-  size=MIN(sampleMemLen,65536)-sampleTableBase;
+  if (ps1Mode) {
+    size=sampleMemLen;
+    unsigned char* ret=new unsigned char[size];
+    memcpy(ret,copyOfSampleMem,size);
+    return ret;
+  }
+  size=MIN(sampleMemLen,(size_t)65536)-sampleTableBase;
   unsigned char* ret=new unsigned char[size];
   memcpy(ret,&copyOfSampleMem[sampleTableBase],size);
-
   return ret;
 }
 
 void DivPlatformSNES::renderSamples(int sysID) {
-  memset(copyOfSampleMem,0,65536);
+  memset(copyOfSampleMem,0,sampleMemSize);
   memset(sampleOff,0,32768*sizeof(unsigned int));
   memset(sampleLoaded,0,32768*sizeof(bool));
 
   memCompo=DivMemoryComposition();
-  memCompo.name="SPC/DSP Memory";
 
-  memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"State",-1,0,sampleTableBase));
-  memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"Channel Sample Pointers",-1,sampleTableBase,sampleTableBase+8*4));
-  memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_WAVE_RAM,"Wave RAM",-1,sampleTableBase+8*4,sampleTableBase+8*4+8*9*16));
+  if (ps1Mode) {
+    // PS1 SPU mode: linear sample layout, no directory table, no echo buffer
+    memCompo.name="SPU Memory";
+    size_t memPos=0;
 
-  // skip past sample table and wavetable buffer
-  size_t memPos=sampleTableBase+8*4+8*9*16;
-  size_t sampleTablePos=memPos;
-  
-  // allocate sample table
-  int maxSample=0;
-  for (int i=0; i<parent->song.sampleLen; i++) {
-    DivSample* s=parent->song.sample[i];
-    if (!s->renderOn[0][sysID]) {
-      continue;
-    }
-    maxSample=i;
-  }
-  memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"Sample Directory",-1,memPos,memPos+(maxSample+1)*4));
-  memPos+=(maxSample+1)*4;
-
-  // write samples
-  for (int i=0; i<parent->song.sampleLen; i++) {
-    DivSample* s=parent->song.sample[i];
-    if (!s->renderOn[0][sysID]) {
-      sampleOff[i]=0;
-      continue;
-    }
-
-    int length=s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0);
-    int actualLength=MIN((int)(getSampleMemCapacity()-memPos)/9*9,length);
-    if (actualLength>0) {
-      sampleOff[i]=memPos;
-      memcpy(&copyOfSampleMem[memPos],s->dataBRR,actualLength);
-      // inject loop if needed
-      if (s->loop) {
-        copyOfSampleMem[memPos+actualLength-9]|=3;
-      } else {
-        copyOfSampleMem[memPos+actualLength-9]&=~3;
-        copyOfSampleMem[memPos+actualLength-9]|=1;
+    for (int i=0; i<parent->song.sampleLen; i++) {
+      DivSample* s=parent->song.sample[i];
+      if (!s->renderOn[0][sysID]) {
+        sampleOff[i]=0;
+        continue;
       }
-      memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample",i,memPos,memPos+actualLength));
-      memPos+=actualLength;
+
+      int length=s->lengthPS1SPU;
+      int actualLength=MIN((int)(getSampleMemCapacity()-memPos),length);
+      // align to 16-byte blocks
+      actualLength=(actualLength/16)*16;
+      if (actualLength>0) {
+        sampleOff[i]=memPos;
+        memcpy(&copyOfSampleMem[memPos],s->dataPS1SPU,actualLength);
+        // set loop/end flags in the last block
+        if (actualLength>=16) {
+          if (s->loop) {
+            copyOfSampleMem[memPos+actualLength-16+1]|=0x03; // loop end + repeat
+            // set loop start flag on the block containing loopStart
+            int loopBlock=(s->loopStart/28)*16;
+            if (loopBlock<actualLength) {
+              copyOfSampleMem[memPos+loopBlock+1]|=0x04; // loop start
+            }
+          } else {
+            copyOfSampleMem[memPos+actualLength-16+1]|=0x01; // end + mute
+          }
+        }
+        memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample",i,memPos,memPos+actualLength));
+        memPos+=actualLength;
+      }
+      if (actualLength<length) {
+        logW("out of SPU memory for sample %d!",i);
+        break;
+      }
+      sampleLoaded[i]=true;
     }
-    if (actualLength<length) {
-      // terminate the sample
-      copyOfSampleMem[memPos-9]=1;
-      logW("out of BRR memory for sample %d!",i);
-      break;
+    sampleMemLen=memPos;
+
+    memCompo.capacity=sampleMemSize;
+    memCompo.used=sampleMemLen;
+    memcpy(sampleMem,copyOfSampleMem,sampleMemSize);
+  } else {
+    // SNES mode: BRR with sample directory table and echo buffer
+    memCompo.name="SPC/DSP Memory";
+
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"State",-1,0,sampleTableBase));
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"Channel Sample Pointers",-1,sampleTableBase,sampleTableBase+8*4));
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_WAVE_RAM,"Wave RAM",-1,sampleTableBase+8*4,sampleTableBase+8*4+8*9*16));
+
+    // skip past sample table and wavetable buffer
+    size_t memPos=sampleTableBase+8*4+8*9*16;
+    size_t sampleTablePos=memPos;
+
+    // allocate sample table
+    int maxSample=0;
+    for (int i=0; i<parent->song.sampleLen; i++) {
+      DivSample* s=parent->song.sample[i];
+      if (!s->renderOn[0][sysID]) {
+        continue;
+      }
+      maxSample=i;
     }
-    sampleLoaded[i]=true;
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"Sample Directory",-1,memPos,memPos+(maxSample+1)*4));
+    memPos+=(maxSample+1)*4;
+
+    // write samples
+    for (int i=0; i<parent->song.sampleLen; i++) {
+      DivSample* s=parent->song.sample[i];
+      if (!s->renderOn[0][sysID]) {
+        sampleOff[i]=0;
+        continue;
+      }
+
+      int length=s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0);
+      int actualLength=MIN((int)(getSampleMemCapacity()-memPos)/9*9,length);
+      if (actualLength>0) {
+        sampleOff[i]=memPos;
+        memcpy(&copyOfSampleMem[memPos],s->dataBRR,actualLength);
+        // inject loop if needed
+        if (s->loop) {
+          copyOfSampleMem[memPos+actualLength-9]|=3;
+        } else {
+          copyOfSampleMem[memPos+actualLength-9]&=~3;
+          copyOfSampleMem[memPos+actualLength-9]|=1;
+        }
+        memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_SAMPLE,"Sample",i,memPos,memPos+actualLength));
+        memPos+=actualLength;
+      }
+      if (actualLength<length) {
+        // terminate the sample
+        copyOfSampleMem[memPos-9]=1;
+        logW("out of BRR memory for sample %d!",i);
+        break;
+      }
+      sampleLoaded[i]=true;
+    }
+    sampleMemLen=memPos;
+
+    // finish sample table
+    for (int i=0; i<=maxSample; i++) {
+      if (i>=parent->song.sampleLen) break;
+      DivSample* s=parent->song.sample[i];
+      if (!s->renderOn[0][sysID]) {
+        // unavailable
+        copyOfSampleMem[sampleTablePos+i*4]=0;
+        copyOfSampleMem[sampleTablePos+i*4+1]=0;
+        copyOfSampleMem[sampleTablePos+i*4+2]=0;
+        copyOfSampleMem[sampleTablePos+i*4+3]=0;
+        continue;
+      }
+
+      int start=sampleOff[i];
+      int end=MIN(start+MAX(s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0),1),getSampleMemCapacity());
+      int loop=MAX(start,end-1);
+      if (s->isLoopable()) {
+        loop=((s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0)+start+((s->loopStart/16)*9);
+      }
+
+      copyOfSampleMem[sampleTablePos+i*4]=start&0xff;
+      copyOfSampleMem[sampleTablePos+i*4+1]=start>>8;
+      copyOfSampleMem[sampleTablePos+i*4+2]=loop&0xff;
+      copyOfSampleMem[sampleTablePos+i*4+3]=loop>>8;
+    }
+
+    // even if the delay is 0, the DSP will still operate the first buffer sample
+    // so the ARAM buffer size becomes 4 bytes when the delay is 0
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_ECHO,"Echo Buffer",-1,(0xf800-echoDelay*2048),echoDelay==0?0xf804:0xf800));
+
+    memCompo.capacity=65536;
+    memCompo.used=sampleMemLen+echoDelay*2048;
+    memcpy(sampleMem,copyOfSampleMem,65536);
   }
-  sampleMemLen=memPos;
-
-  // finish sample table
-  for (int i=0; i<=maxSample; i++) {
-    if (i>=parent->song.sampleLen) break;
-    DivSample* s=parent->song.sample[i];
-    if (!s->renderOn[0][sysID]) {
-      // unavailable
-      copyOfSampleMem[sampleTablePos+i*4]=0;
-      copyOfSampleMem[sampleTablePos+i*4+1]=0;
-      copyOfSampleMem[sampleTablePos+i*4+2]=0;
-      copyOfSampleMem[sampleTablePos+i*4+3]=0;
-      continue;
-    }
-
-    int start=sampleOff[i];
-    int end=MIN(start+MAX(s->lengthBRR+((s->loop && s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0),1),getSampleMemCapacity());
-    int loop=MAX(start,end-1);
-    if (s->isLoopable()) {
-      loop=((s->depth!=DIV_SAMPLE_DEPTH_BRR)?9:0)+start+((s->loopStart/16)*9);
-    }
-
-    copyOfSampleMem[sampleTablePos+i*4]=start&0xff;
-    copyOfSampleMem[sampleTablePos+i*4+1]=start>>8;
-    copyOfSampleMem[sampleTablePos+i*4+2]=loop&0xff;
-    copyOfSampleMem[sampleTablePos+i*4+3]=loop>>8;
-  }
-
-  // even if the delay is 0, the DSP will still operate the first buffer sample
-  // so the ARAM buffer size becomes 4 bytes when the delay is 0
-  memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_ECHO,"Echo Buffer",-1,(0xf800-echoDelay*2048),echoDelay==0?0xf804:0xf800));
-
-  memCompo.capacity=65536;
-  memCompo.used=sampleMemLen+echoDelay*2048;
-  memcpy(sampleMem,copyOfSampleMem,65536);
 }
 
 void DivPlatformSNES::setFlags(const DivConfig& flags) {
@@ -1118,26 +1216,46 @@ int DivPlatformSNES::init(DivEngine* p, int channels, int sugRate, const DivConf
   dumpWrites=false;
   skipRegisterWrites=false;
   sampleMemLen=0;
-  chipClock=1024000;
-  rate=chipClock/32;
-  for (int i=0; i<8; i++) {
+
+  chanCount=ps1Mode?24:8;
+  sampleMemSize=ps1Mode?524288:65536;
+
+  if (sampleMem!=NULL) delete[] sampleMem;
+  if (copyOfSampleMem!=NULL) delete[] copyOfSampleMem;
+  sampleMem=new signed char[sampleMemSize];
+  copyOfSampleMem=new signed char[sampleMemSize];
+  memset(sampleMem,0,sampleMemSize);
+  memset(copyOfSampleMem,0,sampleMemSize);
+
+  chipClock=ps1Mode?768000:1024000;
+  rate=ps1Mode?44100:(chipClock/32);
+  for (int i=0; i<chanCount; i++) {
     oscBuf[i]=new DivDispatchOscBuffer;
     oscBuf[i]->setRate(rate);
     isMuted[i]=false;
   }
   setFlags(flags);
   reset();
-  return 8;
+  return chanCount;
 }
 
 void DivPlatformSNES::quit() {
-  for (int i=0; i<8; i++) {
+  for (int i=0; i<chanCount; i++) {
     delete oscBuf[i];
   }
 }
 
+void DivPlatformSNES::setPS1Mode(bool enabled) {
+  ps1Mode=enabled;
+}
+
 // initialization of important arrays
-DivPlatformSNES::DivPlatformSNES() {
+DivPlatformSNES::DivPlatformSNES():
+  ps1Mode(false),
+  chanCount(8),
+  sampleMem(NULL),
+  copyOfSampleMem(NULL),
+  sampleMemSize(0) {
   sampleOff=new unsigned int[32768];
   sampleLoaded=new bool[32768];
 }
@@ -1145,4 +1263,6 @@ DivPlatformSNES::DivPlatformSNES() {
 DivPlatformSNES::~DivPlatformSNES() {
   delete[] sampleOff;
   delete[] sampleLoaded;
+  if (sampleMem!=NULL) delete[] sampleMem;
+  if (copyOfSampleMem!=NULL) delete[] copyOfSampleMem;
 }

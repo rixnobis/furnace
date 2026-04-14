@@ -25,6 +25,8 @@
 #include "../../fixedQueue.h"
 #include "sound/snes/SPC_DSP.h"
 
+#define SNES_PSX_MAX_CHAN 24
+
 class DivPlatformSNES: public DivDispatch {
   struct Channel: public SharedChannel<int> {
     unsigned int audPos;
@@ -52,9 +54,11 @@ class DivPlatformSNES: public DivDispatch {
       shallWriteEnv(false),
       wtLen(16) {} 
   };
-  Channel chan[8];
-  DivDispatchOscBuffer* oscBuf[8];
-  bool isMuted[8];
+  Channel chan[SNES_PSX_MAX_CHAN];
+  DivDispatchOscBuffer* oscBuf[SNES_PSX_MAX_CHAN];
+  bool isMuted[SNES_PSX_MAX_CHAN];
+  bool ps1Mode;
+  int chanCount;
   int globalVolL, globalVolR;
   unsigned char noiseFreq;
   signed char delay;
@@ -90,8 +94,9 @@ class DivPlatformSNES: public DivDispatch {
   };
   FixedQueue<QueuedWrite,256> writes;
 
-  signed char sampleMem[65536];
-  signed char copyOfSampleMem[65536];
+  signed char* sampleMem;
+  signed char* copyOfSampleMem;
+  size_t sampleMemSize;
   size_t sampleMemLen;
   unsigned int* sampleOff;
   bool* sampleLoaded;
@@ -133,6 +138,7 @@ class DivPlatformSNES: public DivDispatch {
     const DivMemoryComposition* getMemCompo(int index);
     const void* compileSampleMem(int index, size_t& size);
     void renderSamples(int chipID);
+    void setPS1Mode(bool enabled);
     int init(DivEngine* parent, int channels, int sugRate, const DivConfig& flags);
     void quit();
     DivPlatformSNES();
