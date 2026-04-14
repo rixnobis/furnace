@@ -32,10 +32,19 @@
 #define sampleTableAddr(c) (sampleTableBase+(c)*4)
 #define waveTableAddr(c) (sampleTableBase+8*4+(c)*9*16)
 
-// PS1 SPU register write - only records for dump, does not queue for SNES DSP
+// PS1 SPU register write - cached, only emits when value changes
 // addresses are offsets from SPU base (0x1F801C00)
-#define ps1Write(a,v) if (!skipRegisterWrites && dumpWrites) {addWrite(a,v);}
+#define ps1Write(a,v) { \
+  unsigned short _a=(unsigned short)(a); \
+  unsigned short _v=(unsigned short)(v); \
+  if (!skipRegisterWrites && dumpWrites && (_a<0x200) && (ps1RegCache[_a]!=_v)) { \
+    ps1RegCache[_a]=_v; \
+    addWrite(_a,_v); \
+  } \
+}
+#define ps1WriteForce(a,v) if (!skipRegisterWrites && dumpWrites) {addWrite(a,v);}
 #define ps1ChWrite(c,a,v) {ps1Write((a)+(c)*0x10,v)}
+#define ps1ChWriteForce(c,a,v) {ps1WriteForce((a)+(c)*0x10,v)}
 
 // PS1 SPU register offsets (per-voice, offset from voice base = ch*0x10)
 #define PS1_REG_VOL_L      0x00
@@ -271,12 +280,7 @@ void DivPlatformSNES::tick(bool sysTick) {
             // start address in 8-byte units
             unsigned int startAddr8=sampleOff[chan[i].sample]/8;
             ps1ChWrite(i,PS1_REG_START_ADDR,startAddr8&0xffff);
-            // loop address
-            DivSample* sa=parent->getSample(chan[i].sample);
-            if (sa->isLoopable()) {
-              unsigned int loopAddr8=(sampleOff[chan[i].sample]+((sa->loopStart/28)*16))/8;
-              ps1ChWrite(i,PS1_REG_LOOP_ADDR,loopAddr8&0xffff);
-            }
+            // loop address is set automatically by ADPCM block flags in sample data
           }
           kon|=(1<<i);
           koff|=(1<<i);
@@ -331,9 +335,9 @@ void DivPlatformSNES::tick(bool sysTick) {
   }
   if (koff!=0) {
     if (ps1Mode) {
-      // PS1 key-off: write to KEY_OFF register (32-bit split across two 16-bit regs)
-      ps1Write(PS1_REG_KEY_OFF_LO,koff&0xffff);
-      ps1Write(PS1_REG_KEY_OFF_HI,(koff>>16)&0xffff);
+      // PS1 key-off: only emit words with active bits
+      if (koff&0xffff) ps1WriteForce(PS1_REG_KEY_OFF_LO,koff&0xffff);
+      if (koff>>16) ps1WriteForce(PS1_REG_KEY_OFF_HI,(koff>>16)&0xffff);
     } else {
       // TODO: improve
       if (antiClick) {
@@ -410,8 +414,9 @@ void DivPlatformSNES::tick(bool sysTick) {
   }
   if (kon!=0) {
     if (ps1Mode) {
-      ps1Write(PS1_REG_KEY_ON_LO,kon&0xffff);
-      ps1Write(PS1_REG_KEY_ON_HI,(kon>>16)&0xffff);
+      // PS1 key-on: only emit words with active bits
+      if (kon&0xffff) ps1WriteForce(PS1_REG_KEY_ON_LO,kon&0xffff);
+      if (kon>>16) ps1WriteForce(PS1_REG_KEY_ON_HI,(kon>>16)&0xffff);
     } else {
       rWrite(0x4c,kon);
     }
@@ -1008,6 +1013,8 @@ void DivPlatformSNES::reset() {
 
   if (ps1Mode) {
     dsp.initPS1(sampleMem);
+    // invalidate register cache so first writes always emit
+    memset(ps1RegCache,0xff,sizeof(ps1RegCache));
   } else {
     dsp.init(sampleMem);
   }

@@ -59,6 +59,8 @@ class DivPlatformSNES: public DivDispatch {
   bool isMuted[SNES_PSX_MAX_CHAN];
   bool ps1Mode;
   int chanCount;
+  // PS1 register write cache - only emit when value changes
+  unsigned short ps1RegCache[0x200]; // enough for all SPU registers
   int globalVolL, globalVolR;
   unsigned char noiseFreq;
   signed char delay;
