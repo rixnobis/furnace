@@ -142,4 +142,17 @@ void DivEngine::registerROMExports() {
     },
     false, DIV_REQPOL_ANY
   );
+
+  romExportDefs[DIV_ROM_SPUDUMP]=new DivROMExportDef(
+    "PlayStation SPU Dump", "Nicolas Noble",
+    "PS1 SPU register write stream.\n"
+    "packet-based format with pattern/order structure,\n"
+    "sample data, and seekable pattern entry points.\n"
+    "designed for trivial PS1-side playback.",
+    "SPU dump file", ".spudump",
+    {
+      DIV_SYSTEM_PS1_SPU
+    },
+    false, DIV_REQPOL_EXACT
+  );
 }
