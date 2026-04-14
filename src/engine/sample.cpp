@@ -37,6 +37,7 @@ extern "C" {
 }
 #include "../../extern/adpcm-xq-s/adpcm-lib.h"
 #include "brrUtils.h"
+#include "ps1SpuAdpcm.h"
 
 DivSampleHistory::~DivSampleHistory() {
   if (data!=NULL) delete[] data;
@@ -280,6 +281,9 @@ int DivSample::getSampleOffset(int offset, int length, DivSampleDepth depth) {
       case DIV_SAMPLE_DEPTH_BRR:
         off=9*((offset+15)/16);
         break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+        off=16*((offset+27)/28);
+        break;
       case DIV_SAMPLE_DEPTH_VOX:
         off=(offset+1)/2;
         break;
@@ -344,6 +348,10 @@ int DivSample::getSampleOffset(int offset, int length, DivSampleDepth depth) {
       case DIV_SAMPLE_DEPTH_BRR:
         off=9*((offset+15)/16);
         len=9*((length+15)/16);
+        break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+        off=16*((offset+27)/28);
+        len=16*((length+27)/28);
         break;
       case DIV_SAMPLE_DEPTH_VOX:
         off=(offset+1)/2;
@@ -417,6 +425,9 @@ int DivSample::getEndPosition(DivSampleDepth depth) {
       break;
     case DIV_SAMPLE_DEPTH_BRR:
       off=lengthBRR;
+      break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      off=lengthPS1SPU;
       break;
     case DIV_SAMPLE_DEPTH_VOX:
       off=lengthVOX;
@@ -655,6 +666,12 @@ bool DivSample::initInternal(DivSampleDepth d, int count) {
       data16=new short[(count+511)&(~0x1ff)];
       memset(data16,0,((count+511)&(~0x1ff))*sizeof(short));
       break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM: // PS1 SPU ADPCM
+      if (dataPS1SPU!=NULL) delete[] dataPS1SPU;
+      lengthPS1SPU=16*((count+27)/28);
+      dataPS1SPU=new unsigned char[lengthPS1SPU+16];
+      memset(dataPS1SPU,0,lengthPS1SPU+16);
+      break;
     default:
       return false;
   }
@@ -887,6 +904,9 @@ void DivSample::convert(DivSampleDepth newDepth, unsigned int formatMask) {
       break;
     case DIV_SAMPLE_DEPTH_BRR: // BRR
       setSampleCount(16*(lengthBRR/9));
+      break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM: // PS1 SPU ADPCM
+      setSampleCount(28*(lengthPS1SPU/16));
       break;
     case DIV_SAMPLE_DEPTH_VOX: // VOX
       setSampleCount((samples+1)&(~1));
@@ -1323,6 +1343,9 @@ void DivSample::render(unsigned int formatMask) {
       case DIV_SAMPLE_DEPTH_BRR: // BRR
         brrDecode(dataBRR,data16,lengthBRR,brrEmphasis);
         break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM: // PS1 SPU ADPCM
+        ps1SpuAdpcmDecode(dataPS1SPU,data16,lengthPS1SPU);
+        break;
       case DIV_SAMPLE_DEPTH_VOX: // VOX
         oki_decode(dataVOX,data16,samples);
         break;
@@ -1498,6 +1521,12 @@ void DivSample::render(unsigned int formatMask) {
     if (!initInternal(DIV_SAMPLE_DEPTH_BRR,sampleCount)) return;
     brrEncode(data16,dataBRR,sampleCount,loop?loopStart:-1,brrEmphasis,brrNoFilter);
   }
+  if (NOT_IN_FORMAT(DIV_SAMPLE_DEPTH_SPU_ADPCM)) { // PS1 SPU ADPCM
+    int sampleCount=isLoopable()?loopEnd:samples;
+    if (sampleCount>(int)samples) sampleCount=samples;
+    if (!initInternal(DIV_SAMPLE_DEPTH_SPU_ADPCM,sampleCount)) return;
+    ps1SpuAdpcmEncode(data16,dataPS1SPU,sampleCount,loop?loopStart:-1);
+  }
   if (NOT_IN_FORMAT(DIV_SAMPLE_DEPTH_VOX)) { // VOX
     if (!initInternal(DIV_SAMPLE_DEPTH_VOX,samples)) return;
     oki_encode(data16,dataVOX,samples);
@@ -1601,6 +1630,8 @@ void* DivSample::getCurBuf() {
       return data8;
     case DIV_SAMPLE_DEPTH_BRR:
       return dataBRR;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      return dataPS1SPU;
     case DIV_SAMPLE_DEPTH_VOX:
       return dataVOX;
     case DIV_SAMPLE_DEPTH_MULAW:
@@ -1641,6 +1672,8 @@ unsigned int DivSample::getCurBufLen() {
       return length8;
     case DIV_SAMPLE_DEPTH_BRR:
       return lengthBRR;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      return lengthPS1SPU;
     case DIV_SAMPLE_DEPTH_VOX:
       return lengthVOX;
     case DIV_SAMPLE_DEPTH_MULAW:

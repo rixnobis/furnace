@@ -779,6 +779,7 @@ src/engine/fileOps/pvi.cpp
 src/engine/fileOps/pzi.cpp
 
 src/engine/brrUtils.c
+src/engine/ps1SpuAdpcm.c
 src/engine/safeReader.cpp
 src/engine/safeWriter.cpp
 src/engine/workPool.cpp
