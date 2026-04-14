@@ -265,7 +265,7 @@ the channel count is stored in the file in order to allow Furnace to load files 
 - 0xde: YM2610B extended - 19 channels
 - 0xdf: YM2612 XGM extended - 13 channels (UNAVAILABLE)
 - 0xe0: QSound - 19 channels
-- 0xe1: PS1 - 24 channels (UNAVAILABLE)
+- 0xe1: PS1 SPU - 24 channels
 - 0xe2: C64 (6581) with PCM - 4 channels
 - 0xe3: Watara Supervision - 4 channels
 - 0xe5: µPD1771C-017 - 4 channels
@@ -505,6 +505,7 @@ size | description
      | - 13: IMA ADPCM
      | - 14: 12-bit PCM (MultiPCM)
      | - 16: 16-bit PCM
+     | - 17: PS1 SPU ADPCM (>=246)
   1  | loop direction (>=123) or reserved
      | - 0: forward
      | - 1: backward
@@ -849,6 +850,7 @@ size | description
      | - 9: BRR (SNES)
      | - 10: VOX
      | - 16: 16-bit PCM
+     | - 17: PS1 SPU ADPCM (>=246)
   1  | reserved
   2  | C-4 rate (>=32) or reserved
   4  | loop point (>=19) or reserved
