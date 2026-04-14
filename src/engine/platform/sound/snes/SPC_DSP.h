@@ -59,6 +59,30 @@ public:
 	// Run PS1 SPU for one sample pair (simplified, non-cycle-accurate)
 	void runPS1( int clocks );
 
+	// PS1 reverb configuration
+	struct PS1Reverb {
+		bool enabled;
+		unsigned int voiceMask;    // per-voice reverb enable (24 bits)
+		unsigned int bufferAddr;   // mBASE (current buffer position, in samples)
+		unsigned int bufferBase;   // mBASE start address (in samples)
+		short vLOUT, vROUT;        // reverb output volume
+		short vLIN, vRIN;          // reverb input volume
+		// 32 config registers (as 16-bit signed values)
+		short dAPF1, dAPF2;
+		short vIIR, vCOMB1, vCOMB2, vCOMB3, vCOMB4, vWALL;
+		short vAPF1, vAPF2;
+		short mLSAME, mRSAME, mLCOMB1, mRCOMB1, mLCOMB2, mRCOMB2;
+		short dLSAME, dRSAME, mLDIFF, mRDIFF, mLCOMB3, mRCOMB3, mLCOMB4, mRCOMB4;
+		short dLDIFF, dRDIFF, mLAPF1, mRAPF1, mLAPF2, mRAPF2;
+		// internal state
+		int everyOtherSample;      // toggles 0/1 for 22050Hz processing
+		int lastLout, lastRout;    // for interpolation from 22050->44100
+
+		PS1Reverb() { memset(this, 0, sizeof(*this)); }
+	};
+	void setPS1Reverb( const PS1Reverb& rev );
+	const PS1Reverb& getPS1Reverb() const;
+
 // Sound control
 
 	// Mutes voices corresponding to non-zero bits in mask (issues repeated KOFF events).
@@ -207,6 +231,7 @@ private:
 		bool ps1_mode;  // true = PS1 SPU mode
 		int active_voice_count; // 8 for SNES, 24 for PS1
 		int ram_mask;   // 0xFFFF for SNES, 0x7FFFF for PS1
+		PS1Reverb ps1_reverb;
 		int mute_mask;
 		sample_t* out;
 		sample_t* out_end;
@@ -263,7 +288,11 @@ private:
 	// PS1 SPU ADPCM decoding
 	void decodePS1SpuAdpcm( voice_t* v );
 	// PS1 SPU per-voice processing (one sample)
-	void runPS1Voice( voice_t* v, int vIdx, int* mainOut );
+	void runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn );
+	// PS1 reverb processing (runs at 22050Hz)
+	void runPS1Reverb( int* reverbIn, int* reverbOut );
+	inline int ps1ReverbRead( int offset );
+	inline void ps1ReverbWrite( int offset, int value );
 
 public:
     bool mute() { return m.regs[r_flg] & 0x40; }

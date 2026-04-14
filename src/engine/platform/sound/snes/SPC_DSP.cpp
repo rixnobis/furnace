@@ -1036,7 +1036,7 @@ void SPC_DSP::decodePS1SpuAdpcm( voice_t* v )
 	}
 }
 
-void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut )
+void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 {
 	if ( v->kon_delay )
 	{
@@ -1055,12 +1055,9 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut )
 	}
 
 	// decode ADPCM if we need more samples
-	// the pitch counter (interp_pos) advancing past 0x1000 means we need to decode
 	if ( v->env_mode != env_release || v->env > 0 )
 	{
-		// ensure buffer has decoded samples ahead of interp position
 		int neededPos = (v->interp_pos >> 12) + v->buf_pos;
-		// decode in pairs as needed
 		while ( v->brr_offset == 0 || neededPos >= v->buf_pos + 2 )
 		{
 			decodePS1SpuAdpcm( v );
@@ -1083,37 +1080,191 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut )
 	if ( m.mute_mask & (1 << vIdx) )
 		output = 0;
 
-	// the platform layer writes volume/pan to regs - for PS1 we use a simpler model
-	// store raw output for the platform to handle volume/pan
+	// store raw output for oscilloscope
 	v->out[0] = output;
 	v->out[1] = output;
 
+	// route to main output
 	mainOut[0] += output;
 	mainOut[1] += output;
+
+	// route to reverb input if this voice has reverb enabled
+	if ( m.ps1_reverb.voiceMask & (1 << vIdx) )
+	{
+		reverbIn[0] += output;
+		reverbIn[1] += output;
+	}
+}
+
+// PS1 reverb buffer read helper (16-bit signed sample at offset from current buffer position)
+inline int SPC_DSP::ps1ReverbRead( int offset )
+{
+	PS1Reverb& r = m.ps1_reverb;
+	// offset is in sample units (16-bit), convert to byte address
+	unsigned int addr = r.bufferAddr + offset * 2;
+	// wrap within mBASE..0x7FFFE
+	unsigned int base = r.bufferBase;
+	unsigned int end = 0x80000; // 512KB
+	if (addr >= end) addr = base + (addr - end);
+	if (addr < base) addr = end - (base - addr);
+	addr &= m.ram_mask & ~1; // align to 16-bit
+	return (int16_t)GET_LE16A( &m.ram[addr] );
+}
+
+// PS1 reverb buffer write helper
+inline void SPC_DSP::ps1ReverbWrite( int offset, int value )
+{
+	PS1Reverb& r = m.ps1_reverb;
+	if (value > 32767) value = 32767;
+	if (value < -32768) value = -32768;
+	unsigned int addr = r.bufferAddr + offset * 2;
+	unsigned int base = r.bufferBase;
+	unsigned int end = 0x80000;
+	if (addr >= end) addr = base + (addr - end);
+	if (addr < base) addr = end - (base - addr);
+	addr &= m.ram_mask & ~1;
+	SET_LE16A( &m.ram[addr], (int16_t)value );
+}
+
+// multiply two signed 16-bit values, result divided by 0x8000
+static inline int ps1Mul( int a, int b )
+{
+	return (int)((long long)a * b / 32768);
+}
+
+void SPC_DSP::runPS1Reverb( int* reverbIn, int* reverbOut )
+{
+	PS1Reverb& r = m.ps1_reverb;
+
+	if (!r.enabled) {
+		reverbOut[0] = 0;
+		reverbOut[1] = 0;
+		return;
+	}
+
+	// reverb processes at 22050Hz (every other sample)
+	r.everyOtherSample ^= 1;
+	if (r.everyOtherSample) {
+		// interpolate: output halfway between last and current
+		reverbOut[0] = r.lastLout;
+		reverbOut[1] = r.lastRout;
+		return;
+	}
+
+	// input from voices with reverb enabled, scaled by input volume
+	int Lin = ps1Mul( r.vLIN, reverbIn[0] );
+	int Rin = ps1Mul( r.vRIN, reverbIn[1] );
+
+	// same-side reflection (IIR)
+	int mLSAME_prev = ps1ReverbRead( r.mLSAME - 1 );
+	int mRSAME_prev = ps1ReverbRead( r.mRSAME - 1 );
+	int dLSAME_val  = ps1ReverbRead( r.dLSAME );
+	int dRSAME_val  = ps1ReverbRead( r.dRSAME );
+
+	int newLSAME = ps1Mul( (Lin + ps1Mul(dLSAME_val, r.vWALL) - mLSAME_prev), r.vIIR ) + mLSAME_prev;
+	int newRSAME = ps1Mul( (Rin + ps1Mul(dRSAME_val, r.vWALL) - mRSAME_prev), r.vIIR ) + mRSAME_prev;
+	ps1ReverbWrite( r.mLSAME, newLSAME );
+	ps1ReverbWrite( r.mRSAME, newRSAME );
+
+	// different-side reflection (IIR)
+	int mLDIFF_prev = ps1ReverbRead( r.mLDIFF - 1 );
+	int mRDIFF_prev = ps1ReverbRead( r.mRDIFF - 1 );
+	int dRDIFF_val  = ps1ReverbRead( r.dRDIFF );
+	int dLDIFF_val  = ps1ReverbRead( r.dLDIFF );
+
+	int newLDIFF = ps1Mul( (Lin + ps1Mul(dRDIFF_val, r.vWALL) - mLDIFF_prev), r.vIIR ) + mLDIFF_prev;
+	int newRDIFF = ps1Mul( (Rin + ps1Mul(dLDIFF_val, r.vWALL) - mRDIFF_prev), r.vIIR ) + mRDIFF_prev;
+	ps1ReverbWrite( r.mLDIFF, newLDIFF );
+	ps1ReverbWrite( r.mRDIFF, newRDIFF );
+
+	// comb filter (4 taps)
+	int Lout = ps1Mul(r.vCOMB1, ps1ReverbRead(r.mLCOMB1))
+	         + ps1Mul(r.vCOMB2, ps1ReverbRead(r.mLCOMB2))
+	         + ps1Mul(r.vCOMB3, ps1ReverbRead(r.mLCOMB3))
+	         + ps1Mul(r.vCOMB4, ps1ReverbRead(r.mLCOMB4));
+	int Rout = ps1Mul(r.vCOMB1, ps1ReverbRead(r.mRCOMB1))
+	         + ps1Mul(r.vCOMB2, ps1ReverbRead(r.mRCOMB2))
+	         + ps1Mul(r.vCOMB3, ps1ReverbRead(r.mRCOMB3))
+	         + ps1Mul(r.vCOMB4, ps1ReverbRead(r.mRCOMB4));
+
+	// all-pass filter 1
+	{
+		int apfL = ps1ReverbRead( r.mLAPF1 - r.dAPF1 );
+		Lout = Lout - ps1Mul(r.vAPF1, apfL);
+		ps1ReverbWrite( r.mLAPF1, Lout );
+		Lout = ps1Mul(r.vAPF1, Lout) + apfL;
+
+		int apfR = ps1ReverbRead( r.mRAPF1 - r.dAPF1 );
+		Rout = Rout - ps1Mul(r.vAPF1, apfR);
+		ps1ReverbWrite( r.mRAPF1, Rout );
+		Rout = ps1Mul(r.vAPF1, Rout) + apfR;
+	}
+
+	// all-pass filter 2
+	{
+		int apfL = ps1ReverbRead( r.mLAPF2 - r.dAPF2 );
+		Lout = Lout - ps1Mul(r.vAPF2, apfL);
+		ps1ReverbWrite( r.mLAPF2, Lout );
+		Lout = ps1Mul(r.vAPF2, Lout) + apfL;
+
+		int apfR = ps1ReverbRead( r.mRAPF2 - r.dAPF2 );
+		Rout = Rout - ps1Mul(r.vAPF2, apfR);
+		ps1ReverbWrite( r.mRAPF2, Rout );
+		Rout = ps1Mul(r.vAPF2, Rout) + apfR;
+	}
+
+	// output
+	reverbOut[0] = ps1Mul( Lout, r.vLOUT );
+	reverbOut[1] = ps1Mul( Rout, r.vROUT );
+
+	// save for interpolation
+	r.lastLout = reverbOut[0];
+	r.lastRout = reverbOut[1];
+
+	// advance buffer position
+	r.bufferAddr += 2; // 2 bytes = 1 sample
+	if (r.bufferAddr >= 0x80000) r.bufferAddr = r.bufferBase;
+	if (r.bufferAddr < r.bufferBase) r.bufferAddr = r.bufferBase;
+}
+
+void SPC_DSP::setPS1Reverb( const PS1Reverb& rev )
+{
+	m.ps1_reverb = rev;
+}
+
+const SPC_DSP::PS1Reverb& SPC_DSP::getPS1Reverb() const
+{
+	return m.ps1_reverb;
 }
 
 void SPC_DSP::runPS1( int clocks )
 {
 	// PS1 SPU simplified processing: one stereo sample per call
-	// no cycle-accurate timing needed for tracker use
 
 	int mainOut[2] = {0, 0};
+	int reverbIn[2] = {0, 0};
 
 	// process all 24 voices
 	for ( int i = 0; i < ps1_voice_count; i++ )
 	{
 		voice_t* v = &m.voices [i];
-		runPS1Voice( v, i, mainOut );
+		runPS1Voice( v, i, mainOut, reverbIn );
 	}
 
-	// advance noise LFSR (same logic as SNES)
+	// advance noise LFSR
 	run_counters();
 	{
 		int feedback = (m.noise << 13) ^ (m.noise << 14);
 		m.noise = (feedback & 0x4000) ^ (m.noise >> 1);
 	}
 
-	// no reverb in v1 - direct output
+	// reverb processing
+	int reverbOut[2] = {0, 0};
+	runPS1Reverb( reverbIn, reverbOut );
+
+	// mix main + reverb
+	mainOut[0] += reverbOut[0];
+	mainOut[1] += reverbOut[1];
 
 	// clamp and write output
 	CLAMP16( mainOut[0] );
@@ -1127,7 +1278,7 @@ void SPC_DSP::runPS1( int clocks )
 		if ( m.out >= m.out_end )
 		{
 			check_kon();
-			m.out = m.out_begin; // wrap
+			m.out = m.out_begin;
 		}
 	}
 }
