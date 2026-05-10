@@ -71,39 +71,10 @@ static void writeWordPacket(SafeWriter* w, unsigned char type, unsigned int val)
   w->writeI(val);
 }
 
-// write a wait packet
-static void writeWaitPacket(SafeWriter* w, unsigned int ticks) {
-  writePacketHeader(w,SPUD_PKT_WAIT,1);
-  w->writeI(ticks);
-}
-
-// write a register write packet from a batch of writes
-// each write is encoded as (addr16 << 16) | val16
-static void writeRegWritePacket(SafeWriter* w, std::vector<DivRegWrite>& writes, const std::map<int,int>* insMacroMap=NULL) {
-  if (writes.empty()) return;
-  // pre-build output words, remapping macro invocations
-  std::vector<unsigned int> words;
-  words.reserve(writes.size());
-  for (DivRegWrite& wr: writes) {
-    unsigned int addr=wr.addr&0xffff;
-    unsigned int val=wr.val&0xffff;
-    if (addr>=0xF000 && insMacroMap!=NULL) {
-      int insIdx=addr&0x0FFF;
-      auto it=insMacroMap->find(insIdx);
-      if (it!=insMacroMap->end()) {
-        addr=0xF000|it->second;
-      } else {
-        continue; // no macro for this instrument, skip
-      }
-    }
-    words.push_back((addr<<16)|val);
-  }
-  if (words.empty()) return;
-  writePacketHeader(w,SPUD_PKT_REG_WRITE,(unsigned int)words.size());
-  for (unsigned int word: words) {
-    w->writeI(word);
-  }
-}
+// (writeWaitPacket and writeRegWritePacket lived here previously but were made
+// obsolete by the inline-wait packing change - the entire pattern is now emitted
+// as a single 0x00 register-write packet that includes both real writes and
+// inline waits encoded as virtual 0xEFFF addresses.)
 
 // write an empty packet (end of pattern, loop point, trace begin)
 static void writeEmptyPacket(SafeWriter* w, unsigned char type) {

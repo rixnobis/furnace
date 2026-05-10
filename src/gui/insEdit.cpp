@@ -7767,6 +7767,7 @@ void FurnaceGUI::drawInsEdit() {
             ins->type==DIV_INS_MULTIPCM ||
             ins->type==DIV_INS_SU ||
             ins->type==DIV_INS_SNES ||
+            ins->type==DIV_INS_PS1 ||
             ins->type==DIV_INS_ES5506 ||
             ins->type==DIV_INS_K007232 ||
             ins->type==DIV_INS_GA20 ||
@@ -8224,11 +8225,14 @@ void FurnaceGUI::drawInsEdit() {
         }
         if (ins->type==DIV_INS_PS1) if (ImGui::BeginTabItem(_("PlayStation"))) {
           ImVec2 sliderSize=ImVec2(20.0f*dpiScale,128.0*dpiScale);
-          if (ImGui::BeginTable("PS1EnvParams",4,ImGuiTableFlags_NoHostExtendX)) {
+          // Sliders: A | D | S (level) | SR | R | Envelope graph
+          if (ImGui::BeginTable("PS1EnvParams",6,ImGuiTableFlags_NoHostExtendX)) {
             ImGui::TableSetupColumn("c0",ImGuiTableColumnFlags_WidthFixed,sliderSize.x);
             ImGui::TableSetupColumn("c1",ImGuiTableColumnFlags_WidthFixed,sliderSize.x);
             ImGui::TableSetupColumn("c2",ImGuiTableColumnFlags_WidthFixed,sliderSize.x);
             ImGui::TableSetupColumn("c3",ImGuiTableColumnFlags_WidthFixed,sliderSize.x);
+            ImGui::TableSetupColumn("c4",ImGuiTableColumnFlags_WidthFixed,sliderSize.x);
+            ImGui::TableSetupColumn("c5",ImGuiTableColumnFlags_WidthStretch);
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -8241,18 +8245,72 @@ void FurnaceGUI::drawInsEdit() {
             CENTER_TEXT("S");
             ImGui::TextUnformatted("S");
             ImGui::TableNextColumn();
+            CENTER_TEXT("SR");
+            ImGui::TextUnformatted("SR");
+            ImGui::TableNextColumn();
             CENTER_TEXT("R");
             ImGui::TextUnformatted("R");
+            ImGui::TableNextColumn();
+            CENTER_TEXT(_("Envelope"));
+            ImGui::TextUnformatted(_("Envelope"));
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            P(CWVSliderScalar("##Attack",sliderSize,ImGuiDataType_U8,&ins->ps1.a,&_ZERO,&_FIFTEEN));
+            P(CWVSliderScalar("##Attack",sliderSize,ImGuiDataType_U8,&ins->ps1.a,&_ZERO,&_ONE_HUNDRED_TWENTY_SEVEN)); rightClickable
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(_("Attack rate (0-127). Lower = faster attack."));
             ImGui::TableNextColumn();
-            P(CWVSliderScalar("##Decay",sliderSize,ImGuiDataType_U8,&ins->ps1.d,&_ZERO,&_SEVEN));
+            P(CWVSliderScalar("##Decay",sliderSize,ImGuiDataType_U8,&ins->ps1.d,&_ZERO,&_FIFTEEN)); rightClickable
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(_("Decay rate (0-15). Lower = faster decay. Always exponential."));
             ImGui::TableNextColumn();
-            P(CWVSliderScalar("##Sustain",sliderSize,ImGuiDataType_U8,&ins->ps1.s,&_ZERO,&_SEVEN));
+            P(CWVSliderScalar("##SusLevel",sliderSize,ImGuiDataType_U8,&ins->ps1.s,&_ZERO,&_FIFTEEN)); rightClickable
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(_("Sustain level (0-15). Higher = louder sustain."));
             ImGui::TableNextColumn();
-            P(CWVSliderScalar("##Release",sliderSize,ImGuiDataType_U8,&ins->ps1.r,&_ZERO,&_THIRTY_ONE));
+            P(CWVSliderScalar("##SusRate",sliderSize,ImGuiDataType_U8,&ins->ps1.sr,&_ZERO,&_ONE_HUNDRED_TWENTY_SEVEN)); rightClickable
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(_("Sustain rate (0-127). Lower = faster sustain change."));
+            ImGui::TableNextColumn();
+            P(CWVSliderScalar("##Release",sliderSize,ImGuiDataType_U8,&ins->ps1.r,&_ZERO,&_THIRTY_ONE)); rightClickable
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(_("Release rate (0-31). Lower = faster release."));
+            ImGui::TableNextColumn();
+            // Envelope graph - feed normalized values to the FM env drawer.
+            // The drawer expects "high = fast" rates; PS1 hardware is "low = fast", so invert.
+            unsigned char gAr=(127-ins->ps1.a)>>3;          // 0..15
+            unsigned char gDr=(15-ins->ps1.d);              // 0..15
+            unsigned char gD2r=ins->ps1.sDir?((127-ins->ps1.sr)>>3):0; // sustain decrease rate, 0..15
+            unsigned char gRr=(31-ins->ps1.r);              // 0..31
+            unsigned char gSl=(15-ins->ps1.s);              // 0..15 (drawer convention: high=quieter)
+            bool killEnv=(ins->ps1.r==31 && (ins->ps1.sDir==false || ins->ps1.sr==127));
+            drawFMEnv(0,gAr+1,gDr+1,gD2r,gRr,gSl,killEnv?1:0,0,0,15,16,31,ImVec2(ImGui::GetContentRegionAvail().x,sliderSize.y),ins->type);
+
+            ImGui::EndTable();
+          }
+
+          // Mode/direction toggles
+          if (ImGui::BeginTable("PS1Modes",2,ImGuiTableFlags_NoHostExtendX|ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(_("Attack mode:"));
+            if (ImGui::RadioButton(_("Linear##aMode"),!ins->ps1.aExp)) { ins->ps1.aExp=false; PARAMETER; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(_("Exponential##aMode"),ins->ps1.aExp)) { ins->ps1.aExp=true; PARAMETER; }
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(_("Release mode:"));
+            if (ImGui::RadioButton(_("Linear##rMode"),!ins->ps1.rExp)) { ins->ps1.rExp=false; PARAMETER; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(_("Exponential##rMode"),ins->ps1.rExp)) { ins->ps1.rExp=true; PARAMETER; }
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(_("Sustain direction:"));
+            if (ImGui::RadioButton(_("Increase##sDir"),!ins->ps1.sDir)) { ins->ps1.sDir=false; PARAMETER; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(_("Decrease##sDir"),ins->ps1.sDir)) { ins->ps1.sDir=true; PARAMETER; }
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(_("Sustain mode:"));
+            if (ImGui::RadioButton(_("Linear##sMode"),!ins->ps1.sExp)) { ins->ps1.sExp=false; PARAMETER; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(_("Exponential##sMode"),ins->ps1.sExp)) { ins->ps1.sExp=true; PARAMETER; }
 
             ImGui::EndTable();
           }

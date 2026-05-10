@@ -5,6 +5,8 @@
 #ifndef SPC_DSP_H
 #define SPC_DSP_H
 
+#include <cstring>
+
 #include "blargg_common.h"
 
 extern "C" { typedef void (*dsp_copy_func_t)( unsigned char** io, void* state, size_t ); }
@@ -162,6 +164,11 @@ public:
 		uint8_t t_envx_out;
 		sample_t out[2];        // Furnace addition, for per-channel oscilloscope
 		bool interpolate;       // Furnace addition, to disable interpolation
+		// Furnace PS1 SPU additions: ADSR registers as written by the platform layer,
+		// and the fractional envelope counter (matches pcsx-redux's EnvelopeVolF semantics).
+		unsigned short ps1_adsr1;
+		unsigned short ps1_adsr2;
+		int ps1_env_frac;
 	};
 
   // Furnace addition, gets a voice
@@ -287,6 +294,8 @@ private:
 
 	// PS1 SPU ADPCM decoding
 	void decodePS1SpuAdpcm( voice_t* v );
+	// PS1 SPU envelope step (one sample) - reads ps1_adsr1/ps1_adsr2 from voice
+	void run_ps1_envelope( voice_t* v );
 	// PS1 SPU per-voice processing (one sample)
 	void runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn );
 	// PS1 reverb processing (runs at 22050Hz)

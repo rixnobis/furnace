@@ -92,10 +92,8 @@ static const unsigned int ps1ReverbSizes[]={
   0x10, 0x26C0, 0x1F40, 0x4840, 0x6FE0, 0xADE0, 0x3C00, 0xF6C0, 0x18040, 0x18040
 };
 
-static const char* ps1ReverbPresetNames[]={
-  "Off", "Room", "Studio Small", "Studio Medium", "Studio Large",
-  "Hall", "Half Echo", "Space Echo", "Chaos Echo", "Delay"
-};
+// Reverb preset names live in src/gui/sysConf.cpp as inline strings used by the
+// preset combo box. The array used to live here too but was never referenced.
 
 #define PS1_REVERB_PRESET_COUNT 10
 
@@ -343,6 +341,7 @@ void DivPlatformSNES::tick(bool sysTick) {
             v->kon_delay=5;
             v->env_mode=SPC_DSP::env_attack;
             v->env=0;
+            v->ps1_env_frac=0;
             // emit SPU register writes for export
             if (dumpWrites && chan[i].insChanged) {
               // macro invocation covers START_ADDR + ADSR, so emit invocation only
@@ -353,9 +352,9 @@ void DivPlatformSNES::tick(bool sysTick) {
               unsigned short regBase=i*0x10;
               ps1RegCache[regBase+PS1_REG_START_ADDR]=startAddr8&0xffff;
               // compute ADSR values that writeEnv() will try to write
-              int attackShift=(chan[i].state.a>=15)?0:(15-chan[i].state.a);
-              unsigned short adsrLo=(attackShift&0x1f)|((chan[i].state.d&0xf)<<6);
-              unsigned short adsrHi=((chan[i].state.s&0x7)<<1)|((chan[i].state.r&0x1f)<<4);
+              const DivInstrumentPS1& p=chan[i].ps1State;
+              unsigned short adsrLo=(p.s&0xf)|((p.d&0xf)<<4)|((p.a&0x7f)<<8)|((p.aExp?1:0)<<15);
+              unsigned short adsrHi=(p.r&0x1f)|((p.rExp?1:0)<<5)|((p.sr&0x7f)<<6)|((p.sDir?1:0)<<14)|((p.sExp?1:0)<<15);
               ps1RegCache[regBase+PS1_REG_ADSR_LO]=adsrLo;
               ps1RegCache[regBase+PS1_REG_ADSR_HI]=adsrHi;
             } else {
@@ -399,7 +398,13 @@ void DivPlatformSNES::tick(bool sysTick) {
         chan[i].keyOn=false;
       }
       if (chan[i].keyOff) {
-        if (!chan[i].state.sus) {
+        if (ps1Mode) {
+          koff|=(1<<i);
+          // transition the DSP voice into release for in-emulator playback
+          SPC_DSP::voice_t* v=const_cast<SPC_DSP::voice_t*>(dsp.get_voice(i));
+          v->env_mode=SPC_DSP::env_release;
+          v->ps1_env_frac=0;
+        } else if (!chan[i].state.sus) {
           koff|=(1<<i);
         }
         chan[i].keyOff=false;
@@ -561,14 +566,9 @@ int DivPlatformSNES::dispatch(DivCommand c) {
       }
       if (chan[c.chan].insChanged) {
         if (ps1Mode) {
-          // map PS1 ADSR to SNES state (always envelope mode)
-          chan[c.chan].state.useEnv=true;
-          chan[c.chan].state.a=ins->ps1.a;
-          chan[c.chan].state.d=ins->ps1.d;
-          chan[c.chan].state.s=ins->ps1.s;
-          chan[c.chan].state.r=ins->ps1.r;
+          chan[c.chan].ps1State=ins->ps1;
+          // PS1 has its own native sustain handling - the SNES sus mode is unused
           chan[c.chan].state.sus=0;
-          chan[c.chan].state.gainMode=DivInstrumentSNES::GAIN_MODE_DIRECT;
         } else {
           chan[c.chan].state=ins->snes;
         }
@@ -867,36 +867,29 @@ void DivPlatformSNES::writeOutVol(int ch) {
 
 void DivPlatformSNES::writeEnv(int ch) {
   if (ps1Mode) {
-    // PS1 SPU ADSR register format:
-    // ADSR_LO (0x08): sustain_mode:1 | sustain_dir:1 | sustain_shift:5 | decay_shift:4 | attack_mode:1 | attack_shift:5 (but we use simplified mapping)
-    // ADSR_HI (0x0A): sustain_level:4 | release_mode:1 | release_shift:5 | pad:6
-    //
-    // Simplified mapping from Furnace ADSR params to PS1 registers:
-    // Attack: a (0-15) -> attack_shift = 15-a, attack_mode = 0 (linear)
-    // Decay: d (0-7) -> decay_shift = d
-    // Sustain level: s (0-7) -> sustain_level = s<<1 (map 0-7 to 0-14 range)
-    // Release: r (0-31) -> release_shift = r, release_mode = 0 (linear)
-    unsigned short adsrLo=0;
-    unsigned short adsrHi=0;
-
-    // attack: shift in bits 0-4, mode in bit 5
-    int attackShift=(chan[ch].state.a>=15)?0:(15-chan[ch].state.a);
-    adsrLo|=(attackShift&0x1f);
-    // decay: shift in bits 6-9
-    adsrLo|=((chan[ch].state.d&0xf)<<6);
-    // sustain: shift in bits 10-14, dir in bit 15 (0=decrease), mode in bit 14 (0=linear)
-    int sustainShift=chan[ch].state.r; // reuse r for sustain rate in simplified model
-    adsrLo|=((sustainShift&0x1f)<<10);
-
-    // sustain level in bits 0-3 of high word
-    adsrHi|=((chan[ch].state.s&0x7)<<1);
-    // release: shift in bits 4-8
-    int releaseShift=chan[ch].state.r;
-    adsrHi|=((releaseShift&0x1f)<<4);
+    // PS1 SPU ADSR register layout (psx-spx):
+    //   ADSR_LO (0x08): sustainLevel:4 | decay:4 | attack:7 | attackMode:1
+    //   ADSR_HI (0x0A): release:5 | releaseMode:1 | sustainRate:7 | reserved:1 | sustainDir:1 | sustainMode:1
+    // Rate fields: 0=fastest..max=slowest. Modes: 0=linear, 1=exponential.
+    const DivInstrumentPS1& p=chan[ch].ps1State;
+    unsigned short adsrLo=(p.s&0xf)
+                         |((p.d&0xf)<<4)
+                         |((p.a&0x7f)<<8)
+                         |((p.aExp?1:0)<<15);
+    unsigned short adsrHi=(p.r&0x1f)
+                         |((p.rExp?1:0)<<5)
+                         |((p.sr&0x7f)<<6)
+                         |((p.sDir?1:0)<<14)
+                         |((p.sExp?1:0)<<15);
 
     // emit register writes for export
     ps1ChWrite(ch,PS1_REG_ADSR_LO,adsrLo);
     ps1ChWrite(ch,PS1_REG_ADSR_HI,adsrHi);
+
+    // and push to the DSP voice so in-emulator playback uses the same values
+    SPC_DSP::voice_t* v=const_cast<SPC_DSP::voice_t*>(dsp.get_voice(ch));
+    v->ps1_adsr1=adsrLo;
+    v->ps1_adsr2=adsrHi;
     return;
   }
   if (chan[ch].state.useEnv) {

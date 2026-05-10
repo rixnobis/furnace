@@ -881,6 +881,9 @@ void SPC_DSP::initPS1( void* ram_512k )
 		v->interp_pos = 0;
 		v->brr_addr = 0;
 		v->interpolate = true;
+		v->ps1_adsr1 = 0;
+		v->ps1_adsr2 = 0;
+		v->ps1_env_frac = 0;
 		v->out[0] = 0;
 		v->out[1] = 0;
 		memset( v->buf, 0, sizeof v->buf );
@@ -1036,6 +1039,138 @@ void SPC_DSP::decodePS1SpuAdpcm( voice_t* v )
 	}
 }
 
+// PS1 SPU envelope rate-table helpers (per pcsx-redux/peops, validated against psx-spx).
+// Rate field 0..127. Output is the per-tick increment and the cycle period after which
+// it should be applied.
+static inline int ps1EnvDenominator( int rate )
+{
+	if ( rate < 0 ) rate = 0;
+	if ( rate > 127 ) rate = 127;
+	return ( rate < 48 ) ? 1 : ( 1 << ( ( rate >> 2 ) - 11 ) );
+}
+static inline int ps1EnvNumeratorIncrease( int rate )
+{
+	if ( rate < 0 ) rate = 0;
+	if ( rate > 127 ) rate = 127;
+	return ( rate < 48 ) ? ( ( 7 - ( rate & 3 ) ) << ( 11 - ( rate >> 2 ) ) ) : ( 7 - ( rate & 3 ) );
+}
+static inline int ps1EnvNumeratorDecrease( int rate )
+{
+	if ( rate < 0 ) rate = 0;
+	if ( rate > 127 ) rate = 127;
+	return ( rate < 48 ) ? ( ( -8 + ( rate & 3 ) ) << ( 11 - ( rate >> 2 ) ) ) : ( -8 + ( rate & 3 ) );
+}
+
+void SPC_DSP::run_ps1_envelope( voice_t* v )
+{
+	// ADSR1: sustainLevel:4 | decay:4 | attack:7 | attackMode:1
+	// ADSR2: release:5 | releaseMode:1 | sustainRate:7 | reserved:1 | sustainDir:1 | sustainMode:1
+	switch ( v->env_mode )
+	{
+		case env_attack:
+		{
+			int rate = ( v->ps1_adsr1 >> 8 ) & 0x7F;
+			int aExp = ( v->ps1_adsr1 >> 15 ) & 1;
+			// Exponential attack: above 0x6000, the rate is bumped by 8.
+			if ( aExp && v->env >= 0x6000 ) rate += 8;
+			int denom = ps1EnvDenominator( rate );
+			int numer = ps1EnvNumeratorIncrease( rate );
+			v->ps1_env_frac++;
+			if ( v->ps1_env_frac >= denom )
+			{
+				v->ps1_env_frac = 0;
+				v->env += numer;
+			}
+			if ( v->env >= 32767 )
+			{
+				v->env = 32767;
+				v->env_mode = env_decay;
+				v->ps1_env_frac = 0;
+			}
+			if ( v->env < 0 ) v->env = 0;
+			break;
+		}
+		case env_decay:
+		{
+			// Decay rate is 4 bits in ADSR1 (bits 4-7); shift left by 2 to use the 7-bit table.
+			int rate = ( ( v->ps1_adsr1 >> 4 ) & 0xF ) * 4;
+			int denom = ps1EnvDenominator( rate );
+			int numer = ps1EnvNumeratorDecrease( rate );
+			v->ps1_env_frac++;
+			if ( v->ps1_env_frac >= denom )
+			{
+				v->ps1_env_frac = 0;
+				// Decay is always exponential decrease.
+				v->env += ( numer * v->env ) >> 15;
+			}
+			if ( v->env < 0 ) v->env = 0;
+			// Sustain level: target = (s+1) << 11. Compare top 4 bits of env to sustain level.
+			int sustainLevel = v->ps1_adsr1 & 0xF;
+			if ( ( ( v->env >> 11 ) & 0xF ) <= sustainLevel )
+			{
+				v->env_mode = env_sustain;
+				v->ps1_env_frac = 0;
+			}
+			break;
+		}
+		case env_sustain:
+		{
+			int rate = ( v->ps1_adsr2 >> 6 ) & 0x7F;
+			int sDir = ( v->ps1_adsr2 >> 14 ) & 1; // 0=increase, 1=decrease
+			int sExp = ( v->ps1_adsr2 >> 15 ) & 1;
+			int denom, numer;
+			if ( !sDir )
+			{
+				if ( sExp && v->env >= 0x6000 ) rate += 8;
+				denom = ps1EnvDenominator( rate );
+				numer = ps1EnvNumeratorIncrease( rate );
+				v->ps1_env_frac++;
+				if ( v->ps1_env_frac >= denom )
+				{
+					v->ps1_env_frac = 0;
+					v->env += numer;
+				}
+				if ( v->env > 32767 ) v->env = 32767;
+			}
+			else
+			{
+				denom = ps1EnvDenominator( rate );
+				numer = ps1EnvNumeratorDecrease( rate );
+				v->ps1_env_frac++;
+				if ( v->ps1_env_frac >= denom )
+				{
+					v->ps1_env_frac = 0;
+					if ( sExp )
+						v->env += ( numer * v->env ) >> 15;
+					else
+						v->env += numer;
+				}
+				if ( v->env < 0 ) v->env = 0;
+			}
+			break;
+		}
+		case env_release:
+		{
+			// Release rate is 5 bits in ADSR2 (bits 0-4); shift left by 2 to use the 7-bit table.
+			int rate = ( v->ps1_adsr2 & 0x1F ) * 4;
+			int rExp = ( v->ps1_adsr2 >> 5 ) & 1;
+			int denom = ps1EnvDenominator( rate );
+			int numer = ps1EnvNumeratorDecrease( rate );
+			v->ps1_env_frac++;
+			if ( v->ps1_env_frac >= denom )
+			{
+				v->ps1_env_frac = 0;
+				if ( rExp )
+					v->env += ( numer * v->env ) >> 15;
+				else
+					v->env += numer;
+			}
+			if ( v->env < 0 ) v->env = 0;
+			break;
+		}
+	}
+}
+
 void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 {
 	if ( v->kon_delay )
@@ -1045,6 +1180,7 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 		{
 			v->env_mode = env_attack;
 			v->env = 0;
+			v->ps1_env_frac = 0;
 			v->hidden_env = 0;
 			v->buf_pos = 0;
 			v->brr_offset = 0;
@@ -1069,8 +1205,8 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 	// Gaussian interpolation (same table as SNES)
 	int output = interpolate( v );
 
-	// run envelope
-	run_envelope( v );
+	// run envelope using PS1 SPU rate tables
+	run_ps1_envelope( v );
 
 	// apply envelope to output
 	output = (output * v->env) >> 11;

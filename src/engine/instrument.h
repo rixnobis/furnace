@@ -849,18 +849,36 @@ struct DivInstrumentSNES {
 };
 
 struct DivInstrumentPS1 {
-  unsigned char a, d, s, r; // Attack 0-15, Decay 0-7, Sustain 0-7, Release 0-31
+  // PS1 SPU ADSR. Field semantics follow the hardware register layout (psx-spx):
+  //   ADSR1: sustainLevel:4 | decay:4 | attack:7 | attackMode:1
+  //   ADSR2: release:5 | releaseMode:1 | sustainRate:7 | reserved:1 | sustainDir:1 | sustainMode:1
+  // Rate values are raw register values, where 0 = fastest and max = slowest.
+  unsigned char a;        // Attack rate 0-127
+  bool aExp;              // Attack mode: false=linear, true=exponential
+  unsigned char d;        // Decay rate 0-15 (always exponential decrease)
+  unsigned char s;        // Sustain level 0-15 (target = (s+1)*0x800)
+  unsigned char sr;       // Sustain rate 0-127
+  bool sDir;              // Sustain direction: false=increase, true=decrease
+  bool sExp;              // Sustain mode: false=linear, true=exponential
+  unsigned char r;        // Release rate 0-31
+  bool rExp;              // Release mode: false=linear, true=exponential
 
   bool operator==(const DivInstrumentPS1& other);
   bool operator!=(const DivInstrumentPS1& other) {
     return !(*this==other);
   }
 
+  // Default: instant attack, max sustain level (no decay), instant release on key off.
   DivInstrumentPS1():
-    a(15),
-    d(7),
-    s(7),
-    r(0) {}
+    a(0),
+    aExp(false),
+    d(0),
+    s(15),
+    sr(127),
+    sDir(true),
+    sExp(false),
+    r(0),
+    rExp(false) {}
 };
 
 // ESFM operator structure:

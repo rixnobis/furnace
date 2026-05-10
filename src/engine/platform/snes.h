@@ -35,6 +35,7 @@ class DivPlatformSNES: public DivDispatch {
     bool useWave, setPos, noise, echo, pitchMod, invertL, invertR, shallWriteVol, shallWriteEnv;
     int wtLen;
     DivInstrumentSNES state;
+    DivInstrumentPS1 ps1State;
     DivWaveSynth ws;
     Channel():
       SharedChannel<int>(127),

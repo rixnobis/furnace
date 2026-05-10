@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include "pch.h"
 #ifdef HAVE_SDL2
-#include "SDL_events.h"
+#include "SDL.h"
 #endif
 #include "ta-log.h"
 #include "fileutils.h"

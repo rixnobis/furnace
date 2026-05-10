@@ -786,9 +786,14 @@ bool DivInstrumentSNES::operator==(const DivInstrumentSNES& other) {
 bool DivInstrumentPS1::operator==(const DivInstrumentPS1& other) {
   return (
     _C(a) &&
+    _C(aExp) &&
     _C(d) &&
     _C(s) &&
-    _C(r)
+    _C(sr) &&
+    _C(sDir) &&
+    _C(sExp) &&
+    _C(r) &&
+    _C(rExp)
   );
 }
 
@@ -1391,8 +1396,11 @@ void DivInstrument::writeFeatureSN(SafeWriter* w) {
 void DivInstrument::writeFeatureP1(SafeWriter* w) {
   FEATURE_BEGIN("P1");
 
-  w->writeC(((ps1.d&7)<<4)|(ps1.a&15));
-  w->writeC(((ps1.s&7)<<5)|(ps1.r&31));
+  // pack the same way as the PS1 SPU ADSR1/ADSR2 hardware registers
+  unsigned short adsr1=(ps1.s&0xf)|((ps1.d&0xf)<<4)|((ps1.a&0x7f)<<8)|((ps1.aExp?1:0)<<15);
+  unsigned short adsr2=(ps1.r&0x1f)|((ps1.rExp?1:0)<<5)|((ps1.sr&0x7f)<<6)|((ps1.sDir?1:0)<<14)|((ps1.sExp?1:0)<<15);
+  w->writeS(adsr1);
+  w->writeS(adsr2);
 
   FEATURE_END;
 }
@@ -2831,13 +2839,17 @@ void DivInstrument::readFeatureSN(SafeReader& reader, short version) {
 void DivInstrument::readFeatureP1(SafeReader& reader, short version) {
   READ_FEAT_BEGIN;
 
-  unsigned char next=reader.readC();
-  ps1.d=(next>>4)&7;
-  ps1.a=next&15;
-
-  next=reader.readC();
-  ps1.s=(next>>5)&7;
-  ps1.r=next&31;
+  unsigned short adsr1=reader.readS();
+  unsigned short adsr2=reader.readS();
+  ps1.s=adsr1&0xf;
+  ps1.d=(adsr1>>4)&0xf;
+  ps1.a=(adsr1>>8)&0x7f;
+  ps1.aExp=(adsr1>>15)&1;
+  ps1.r=adsr2&0x1f;
+  ps1.rExp=(adsr2>>5)&1;
+  ps1.sr=(adsr2>>6)&0x7f;
+  ps1.sDir=(adsr2>>14)&1;
+  ps1.sExp=(adsr2>>15)&1;
 
   READ_FEAT_END;
 }
