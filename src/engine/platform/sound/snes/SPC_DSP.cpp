@@ -883,6 +883,7 @@ void SPC_DSP::initPS1( void* ram_512k )
 		v->interpolate = true;
 		v->ps1_adsr1 = 0;
 		v->ps1_adsr2 = 0;
+		v->ps1_pitch = 0x1000; // default 1.0x playback
 		v->ps1_env_frac = 0;
 		v->out[0] = 0;
 		v->out[1] = 0;
@@ -1178,6 +1179,7 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 		v->kon_delay--;
 		if ( v->kon_delay == 0 )
 		{
+			// kon_delay completes: enter attack and prime the sample buffer.
 			v->env_mode = env_attack;
 			v->env = 0;
 			v->ps1_env_frac = 0;
@@ -1186,17 +1188,24 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 			v->brr_offset = 0;
 			v->interp_pos = 0;
 			memset( v->buf, 0, sizeof v->buf );
+			// pre-decode one full buf cycle so the first interpolate read has data.
+			// Each PS1 decode produces 2 samples; brr_buf_size/2 = 6 decodes fill buf.
+			for ( int p = 0; p < brr_buf_size / 2; p++ )
+				decodePS1SpuAdpcm( v );
 		}
 		return;
 	}
 
-	// decode ADPCM if we need more samples
+	// Catch the sample buffer up to interp_pos.
+	// Each PS1 decode produces 2 samples; threshold is 0x2000 (half SNES's 0x4000)
+	// so 1.0x playback (pitch 0x1000) crosses the threshold every 2 ticks, matching
+	// the 2 samples produced per decode.
 	if ( v->env_mode != env_release || v->env > 0 )
 	{
-		int neededPos = (v->interp_pos >> 12) + v->buf_pos;
-		while ( v->brr_offset == 0 || neededPos >= v->buf_pos + 2 )
+		while ( v->interp_pos >= 0x2000 )
 		{
 			decodePS1SpuAdpcm( v );
+			v->interp_pos -= 0x2000;
 			if ( v->env == 0 && v->env_mode == env_release )
 				break;
 		}
@@ -1230,6 +1239,12 @@ void SPC_DSP::runPS1Voice( voice_t* v, int vIdx, int* mainOut, int* reverbIn )
 		reverbIn[0] += output;
 		reverbIn[1] += output;
 	}
+
+	// advance the interpolation position by this voice's pitch.
+	// Hardware register convention: 0x1000 = 1.0x rate (44100Hz output).
+	v->interp_pos += v->ps1_pitch;
+	if ( v->interp_pos > 0x7FFF )
+		v->interp_pos = 0x7FFF;
 }
 
 // PS1 reverb buffer read helper (16-bit signed sample at offset from current buffer position)

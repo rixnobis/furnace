@@ -413,6 +413,9 @@ void DivPlatformSNES::tick(bool sysTick) {
         if (ps1Mode) {
           // PS1 SPU pitch: 4.12 fixed-point, 0x1000 = 44100Hz
           ps1ChWrite(i,PS1_REG_PITCH,chan[i].freq&0xffff);
+          // also push to the DSP voice so in-emulator playback uses the right rate
+          SPC_DSP::voice_t* v=const_cast<SPC_DSP::voice_t*>(dsp.get_voice(i));
+          v->ps1_pitch=chan[i].freq&0xffff;
         } else {
           chWrite(i,2,chan[i].freq&0xff);
           chWrite(i,3,chan[i].freq>>8);

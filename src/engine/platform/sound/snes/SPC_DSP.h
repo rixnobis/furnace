@@ -165,9 +165,11 @@ public:
 		sample_t out[2];        // Furnace addition, for per-channel oscilloscope
 		bool interpolate;       // Furnace addition, to disable interpolation
 		// Furnace PS1 SPU additions: ADSR registers as written by the platform layer,
-		// and the fractional envelope counter (matches pcsx-redux's EnvelopeVolF semantics).
+		// the fractional envelope counter (matches pcsx-redux's EnvelopeVolF semantics),
+		// and the pitch register driving interp_pos.
 		unsigned short ps1_adsr1;
 		unsigned short ps1_adsr2;
+		unsigned short ps1_pitch;
 		int ps1_env_frac;
 	};
 
