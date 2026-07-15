@@ -2443,6 +2443,7 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       break;
     }
     case DIV_SYSTEM_NAMCO:
+    case DIV_SYSTEM_NAMCO_POLEPOS:
     case DIV_SYSTEM_NAMCO_15XX: {
       bool romMode=flags.getBool("romMode",false);
 

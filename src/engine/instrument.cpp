@@ -336,17 +336,17 @@ bool DivInstrument::compileSampleMap(SafeWriter* w, bool nes) {
   // don't compile sample map if disabled
   if (!amiga.useNoteMap) return false;
 
-  int low=120;
+  int low=180;
   int high=0;
 
   // find lower/upper boundaries
-  for (int i=0; i<120; i++) {
+  for (int i=0; i<180; i++) {
     if (amiga.noteMap[i].map!=-1) {
       low=i;
       break;
     }
   }
-  for (int i=119; i>=0; i--) {
+  for (int i=179; i>=0; i--) {
     if (amiga.noteMap[i].map!=-1) {
       high=i;
       break;
@@ -1312,7 +1312,7 @@ void DivInstrument::writeFeatureSM(SafeWriter* w) {
   w->writeC(amiga.waveLen);
 
   if (amiga.useNoteMap) {
-    for (int note=0; note<120; note++) {
+    for (int note=0; note<180; note++) {
       w->writeS(amiga.noteMap[note].freq);
       w->writeS(amiga.noteMap[note].map);
     }
@@ -1467,7 +1467,7 @@ size_t DivInstrument::writeFeatureLS(SafeWriter* w, std::vector<int>& list, cons
   }
 
   if (amiga.useNoteMap) {
-    for (int i=0; i<120; i++) {
+    for (int i=0; i<180; i++) {
       if (amiga.noteMap[i].map>=0 && amiga.noteMap[i].map<(int)song->sample.size()) {
         sampleUsed[amiga.noteMap[i].map]=true;
       }
@@ -1624,7 +1624,7 @@ void DivInstrument::writeFeatureNE(SafeWriter* w) {
   w->writeC(amiga.useNoteMap?1:0);
 
   if (amiga.useNoteMap) {
-    for (int note=0; note<120; note++) {
+    for (int note=0; note<180; note++) {
       w->writeC(amiga.noteMap[note].dpcmFreq);
       w->writeC(amiga.noteMap[note].dpcmDelta);
     }
@@ -2643,13 +2643,15 @@ void DivInstrument::readFeatureSM(SafeReader& reader, short version) {
   amiga.waveLen=(unsigned char)reader.readC();
 
   if (amiga.useNoteMap) {
-    for (int note=0; note<120; note++) {
+    int noteLow=(version>=246)?0:60;
+    for (int note=noteLow; note<180; note++) {
       amiga.noteMap[note].freq=reader.readS();
+      if (version<246) amiga.noteMap[note].freq+=60;
       amiga.noteMap[note].map=reader.readS();
     }
 
     if (version<152) {
-      for (int note=0; note<120; note++) {
+      for (int note=0; note<180; note++) {
         amiga.noteMap[note].freq=note;
       }
     }
@@ -2955,7 +2957,7 @@ void DivInstrument::readFeatureSL(SafeReader& reader, DivSong* song, short versi
   }
 
   if (amiga.useNoteMap) {
-    for (int i=0; i<120; i++) {
+    for (int i=0; i<180; i++) {
       if (amiga.noteMap[i].map>=0) {
         amiga.noteMap[i].map=sampleRemap[amiga.noteMap[i].map];
       }
@@ -3090,7 +3092,7 @@ void DivInstrument::readFeatureLS(SafeReader& reader, DivSong* song, short versi
   }
 
   if (amiga.useNoteMap) {
-    for (int i=0; i<120; i++) {
+    for (int i=0; i<180; i++) {
       if (amiga.noteMap[i].map>=0) {
         amiga.noteMap[i].map=sampleRemap[amiga.noteMap[i].map];
       }
@@ -3248,7 +3250,8 @@ void DivInstrument::readFeatureNE(SafeReader& reader, short version) {
   amiga.useNoteMap=reader.readC();
 
   if (amiga.useNoteMap) {
-    for (int note=0; note<120; note++) {
+    int noteLow=(version>=246)?0:60;
+    for (int note=noteLow; note<180; note++) {
       amiga.noteMap[note].dpcmFreq=reader.readC();
       amiga.noteMap[note].dpcmDelta=reader.readC();
     }
@@ -3918,15 +3921,15 @@ DivDataErrors DivInstrument::readInsDataOld(SafeReader &reader, short version) {
   if (version>=67) {
     amiga.useNoteMap=reader.readC();
     if (amiga.useNoteMap) {
-      for (int note=0; note<120; note++) {
+      for (int note=60; note<180; note++) {
         amiga.noteMap[note].freq=reader.readI();
       }
-      for (int note=0; note<120; note++) {
+      for (int note=60; note<180; note++) {
         amiga.noteMap[note].map=reader.readS();
       }
 
       if (version<152) {
-        for (int note=0; note<120; note++) {
+        for (int note=0; note<180; note++) {
           amiga.noteMap[note].freq=note;
         }
       }

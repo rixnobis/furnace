@@ -2760,6 +2760,13 @@ void DivEngine::registerSystems() {
       {0x23, {DIV_CMD_FM_RR, _("23xx: Set release (00 to 1F)")}},
     }
   );
+  sysDefs[DIV_SYSTEM_NAMCO_POLEPOS]=new DivSysDef(
+    _("Namco Pole Position WSG"), NULL, 0xe4, 0, 8, 8, 8,
+    false, true, 0, false, 0, 32, 16,
+    _("a wavetable sound generator used in Pole Position, with 8 voices and quadraphonic sound."),
+    DivChanDefFunc(simpleChanDef<DIV_CH_WAVE,DIV_INS_NAMCO>),
+    namcoEffectHandlerMap
+  );
 
   sysDefs[DIV_SYSTEM_DUMMY]=new DivSysDef(
     _("Dummy System"), NULL, 0xfd, 0, 8, 1, 128,

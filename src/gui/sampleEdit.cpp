@@ -675,7 +675,7 @@ void FurnaceGUI::drawSampleEdit() {
           if (ImGui::BeginCombo("##SampleType",sampleType.c_str())) {
             for (int i=0; i<DIV_SAMPLE_DEPTH_MAX; i++) {
               if (sampleDepths[i]==NULL) continue;
-              if (ImGui::Selectable(sampleDepths[i])) {
+              if (ImGui::Selectable(sampleDepths[i],sample->depth==(DivSampleDepth)i)) {
                 sample->prepareUndo(true);
                 e->lockEngine([this,sample,i]() {
                   sample->convert((DivSampleDepth)i,e->getSampleFormatMask());
@@ -685,6 +685,7 @@ void FurnaceGUI::drawSampleEdit() {
                 notifySampleChange=true;
                 MARK_MODIFIED;
               }
+              if (sample->depth==(DivSampleDepth)i) ImGui::SetItemDefaultFocus();
             }
             ImGui::EndCombo();
           }
@@ -768,6 +769,7 @@ void FurnaceGUI::drawSampleEdit() {
             if (targetRate<100) targetRate=100;
 
             sample->centerRate=targetRate;
+            e->notifyPitchTable(curSample);
           }
           if (targetRate>384000) {
             ImGui::SetItemTooltip(_("this rate is too high. instability may occur!"));
@@ -811,6 +813,7 @@ void FurnaceGUI::drawSampleEdit() {
             if (targetRate<100) targetRate=100;
 
             sample->centerRate=targetRate;
+            e->notifyPitchTable(curSample);
           }
 
           ImGui::AlignTextToFramePadding();
@@ -840,6 +843,7 @@ void FurnaceGUI::drawSampleEdit() {
             if (targetRate<100) targetRate=100;
 
             sample->centerRate=targetRate;
+            e->notifyPitchTable(curSample);
           }
 
           ImGui::TableNextColumn();
@@ -853,7 +857,7 @@ void FurnaceGUI::drawSampleEdit() {
           if (ImGui::BeginCombo("##SampleLoopMode",loopType.c_str())) {
             for (int i=0; i<DIV_SAMPLE_LOOP_MAX; i++) {
               if (sampleLoopModes[i]==NULL) continue;
-              if (ImGui::Selectable(sampleLoopModes[i])) {
+              if (ImGui::Selectable(sampleLoopModes[i],sample->loopMode==(DivSampleLoopMode)i)) {
                 sample->prepareUndo(true);
                 sample->loopMode=(DivSampleLoopMode)i;
                 e->renderSamplesP(curSample);
@@ -1163,6 +1167,7 @@ void FurnaceGUI::drawSampleEdit() {
             }
             e->renderSamples(curSample);
           });
+          e->notifySampleChange(curSample);
           updateSampleTex=true;
           notifySampleChange=true;
           sampleSelStart=-1;

@@ -115,8 +115,8 @@ bool DivCSPlayer::tick() {
       bool mustTell=true;
 
       if (next<0xb3) { // note
-        e->dispatchCmd(DivCommand(DIV_CMD_NOTE_ON,i,(int)next-60));
-        chan[i].note=(int)next-60;
+        e->dispatchCmd(DivCommand(DIV_CMD_NOTE_ON,i,(int)next));
+        chan[i].note=(int)next;
         chan[i].vibratoPos=0;
       } else if (next>=0xf0) { // preset delay
         chan[i].waitTicks=fastDelays[next&15];
@@ -139,6 +139,24 @@ bool DivCSPlayer::tick() {
         case 0xb8:
           command=DIV_CMD_INSTRUMENT;
           break;
+        case 0xb9: {
+          unsigned int param=stream.readI()|DIV_NOTE_RAW_FLAG;
+          e->dispatchCmd(DivCommand(DIV_CMD_NOTE_ON,i,param));
+          chan[i].note=param;
+          chan[i].vibratoPos=0;
+          break;
+        }
+        case 0xba: {
+          chan[i].portaTarget=stream.readI()|DIV_NOTE_RAW_FLAG;
+          chan[i].portaSpeed=(unsigned char)stream.readC();
+          break;
+        }
+        case 0xbb: {
+          unsigned int param=stream.readI()|DIV_NOTE_RAW_FLAG;
+          chan[i].note=param;
+          e->dispatchCmd(DivCommand(DIV_CMD_LEGATO,i,chan[i].note));
+          break;
+        }
         case 0xc0:
           command=DIV_CMD_PRE_PORTA;
           break;
@@ -175,15 +193,13 @@ bool DivCSPlayer::tick() {
           chan[i].tremoloDepth=0;
           break;
         case 0xc9: // porta
-          chan[i].portaTarget=(int)((unsigned char)stream.readC())-60;
+          chan[i].portaTarget=(int)((unsigned char)stream.readC());
           chan[i].portaSpeed=(unsigned char)stream.readC();
           break;
         case 0xca: { // legato
           int arg0=(unsigned char)stream.readC();
           if (arg0==0xff) {
             arg0=DIV_NOTE_NULL;
-          } else {
-            arg0-=60;
           }
           chan[i].note=arg0;
           e->dispatchCmd(DivCommand(DIV_CMD_LEGATO,i,chan[i].note));
@@ -627,7 +643,7 @@ bool DivCSPlayer::tick() {
     }
 
     if (chan[i].portaSpeed) {
-      e->dispatchCmd(DivCommand(DIV_CMD_NOTE_PORTA,i,chan[i].portaSpeed*(e->song.compatFlags.linearPitch?e->song.compatFlags.pitchSlideSpeed:1),chan[i].portaTarget));
+      e->dispatchCmd(DivCommand(DIV_CMD_NOTE_PORTA,i,chan[i].portaSpeed*((e->song.compatFlags.linearPitch && !(chan[i].note&DIV_NOTE_RAW_FLAG))?e->song.compatFlags.pitchSlideSpeed:1),chan[i].portaTarget));
     }
     if (chan[i].arp && !chan[i].portaSpeed) {
       if (chan[i].arpTicks==0) {

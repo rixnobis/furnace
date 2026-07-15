@@ -21,6 +21,7 @@
 #define _INSTRUMENT_H
 #include "safeWriter.h"
 #include "dataErrors.h"
+#include "defines.h"
 #include "../ta-utils.h"
 #include "../pch.h"
 #include "../fixedQueue.h"
@@ -536,7 +537,7 @@ struct DivInstrumentAmiga {
   bool useSample;
   bool useWave;
   unsigned char waveLen;
-  SampleMap noteMap[120];
+  SampleMap noteMap[180];
 
   bool operator==(const DivInstrumentAmiga& other);
   bool operator!=(const DivInstrumentAmiga& other) {
@@ -549,8 +550,9 @@ struct DivInstrumentAmiga {
    */
   inline short getSample(int note) {
     if (useNoteMap) {
+      if (note&DIV_NOTE_RAW_FLAG) return initSample;
       if (note<0) note=0;
-      if (note>119) note=119;
+      if (note>179) note=179;
       return noteMap[note].map;
     }
     return initSample;
@@ -562,8 +564,9 @@ struct DivInstrumentAmiga {
    */
   inline int getFreq(int note) {
     if (useNoteMap) {
+      if (note&DIV_NOTE_RAW_FLAG) return note;
       if (note<0) note=0;
-      if (note>119) note=119;
+      if (note>179) note=179;
       return noteMap[note].freq;
     }
     return note;
@@ -575,8 +578,9 @@ struct DivInstrumentAmiga {
    */
   inline signed char getDPCMFreq(int note) {
     if (useNoteMap) {
+      if (note&DIV_NOTE_RAW_FLAG) return note;
       if (note<0) note=0;
-      if (note>119) note=119;
+      if (note>179) note=179;
       return noteMap[note].dpcmFreq;
     }
     return -1;
@@ -588,8 +592,9 @@ struct DivInstrumentAmiga {
    */
   inline signed char getDPCMDelta(int note) {
     if (useNoteMap) {
+      if (note&DIV_NOTE_RAW_FLAG) return -1;
       if (note<0) note=0;
-      if (note>119) note=119;
+      if (note>179) note=179;
       return noteMap[note].dpcmDelta;
     }
     return -1;
@@ -601,7 +606,7 @@ struct DivInstrumentAmiga {
     useSample(false),
     useWave(false),
     waveLen(31) {
-    for (int i=0; i<120; i++) {
+    for (int i=0; i<180; i++) {
       noteMap[i].map=-1;
       noteMap[i].freq=i;
     }
@@ -1098,7 +1103,7 @@ struct DivInstrumentTemp {
     memset(vScroll,0,160*sizeof(int));
     memset(vZoom,-1,160*sizeof(int));
     memset(typeMemory,0,160*16*sizeof(int));
-    memset(lenMemory,0,160*sizeof(int));
+    memset(lenMemory,0,160*sizeof(unsigned char));
   }
 };
 

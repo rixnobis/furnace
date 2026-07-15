@@ -2840,6 +2840,9 @@ void FurnaceGUI::drawMacros(std::vector<FurnaceGUIMacroDesc>& macros, FurnaceGUI
           // description
           ImGui::TableNextColumn();
           ImGui::Text("%s",i.displayName);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(_("index: %.2X"),i.macro->macroType);
+          }
           ImGui::SameLine();
           if (ImGui::SmallButton((i.macro->open&1)?(ICON_FA_CHEVRON_UP "##IMacroOpen"):(ICON_FA_CHEVRON_DOWN "##IMacroOpen"))) {
             i.macro->open^=1;
@@ -2917,6 +2920,9 @@ void FurnaceGUI::drawMacros(std::vector<FurnaceGUIMacroDesc>& macros, FurnaceGUI
           ImGui::PushID(index);
 
           ImGui::TextUnformatted(i.displayName);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(_("index: %.2X"),i.macro->macroType);
+          }
           ImGui::SameLine();
           if (ImGui::SmallButton((i.macro->open&1)?(ICON_FA_CHEVRON_UP "##IMacroOpen"):(ICON_FA_CHEVRON_DOWN "##IMacroOpen"))) {
             i.macro->open^=1;
@@ -2987,6 +2993,9 @@ void FurnaceGUI::drawMacros(std::vector<FurnaceGUIMacroDesc>& macros, FurnaceGUI
 
           if (ImGui::Selectable(buf,state.selectedMacro==(int)i)) {
             state.selectedMacro=i;
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(_("index: %.2X"),macros[i].macro->macroType);
           }
         }
 
@@ -3143,7 +3152,7 @@ void FurnaceGUI::alterSampleMap(int column, int val) {
   }
 
   for (int i=sampleMapMin; i<=sampleMapMax; i++) {
-    if (i<0 || i>=120) continue;
+    if (i<0 || i>=180) continue;
 
     if (sampleMapColumn==1 && column==1) {
       ins->amiga.noteMap[i].freq=val;
@@ -3215,7 +3224,7 @@ void FurnaceGUI::alterSampleMap(int column, int val) {
 
   if (advance && sampleMapMin==sampleMapMax) {
     sampleMapSelStart++;
-    if (sampleMapSelStart>119) sampleMapSelStart=119;
+    if (sampleMapSelStart>179) sampleMapSelStart=179;
     sampleMapSelEnd=sampleMapSelStart;
   }
 
@@ -3395,19 +3404,21 @@ void FurnaceGUI::insTabWavetable(DivInstrument* ins)
         ImGui::Text(_("Single-waveform"));
         ImGui::Indent();
         for (int i=0; i<DIV_WS_SINGLE_MAX; i++) {
-          if (ImGui::Selectable(_(singleWSEffects[i]))) { PARAMETER
+          if (ImGui::Selectable(_(singleWSEffects[i]),ins->ws.effect==i)) { PARAMETER
             ins->ws.effect=i;
             wavePreviewInit=true;
           }
+          if (ins->ws.effect==i) ImGui::SetItemDefaultFocus();
         }
         ImGui::Unindent();
         ImGui::Text(_("Dual-waveform"));
         ImGui::Indent();
         for (int i=129; i<DIV_WS_DUAL_MAX; i++) {
-          if (ImGui::Selectable(_(dualWSEffects[i-128]))) { PARAMETER
+          if (ImGui::Selectable(_(dualWSEffects[i-128]),ins->ws.effect==i)) { PARAMETER
             ins->ws.effect=i;
             wavePreviewInit=true;
           }
+          if (ins->ws.effect==i) ImGui::SetItemDefaultFocus();
         }
         ImGui::Unindent();
         ImGui::EndCombo();
@@ -3726,13 +3737,13 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
 
         ImGui::PushStyleColor(ImGuiCol_Header,ImGui::GetColorU32(ImGuiCol_HeaderHovered));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,ImGui::GetColorU32(ImGuiCol_HeaderHovered));
-        for (int i=0; i<120; i++) {
+        for (int i=0; i<180; i++) {
           DivInstrumentAmiga::SampleMap& sampleMap=ins->amiga.noteMap[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg,ImGui::GetColorU32(ImGuiCol_TableHeaderBg));
           ImGui::AlignTextToFramePadding();
-          ImGui::Text("%s",noteNames[60+i]);
+          ImGui::Text("%s",noteNames[i]);
           ImGui::TableNextColumn();
           if (sampleMap.map<0 || sampleMap.map>=e->song.sampleLen) {
             sName=fmt::sprintf("-----##SM%d",i);
@@ -3896,8 +3907,8 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
           } else {
             ImGui::TableNextColumn();
             sName="???";
-            if ((sampleMap.freq+60)>0 && (sampleMap.freq+60)<180) {
-              sName=noteNames[sampleMap.freq+60];
+            if ((sampleMap.freq)>=0 && (sampleMap.freq)<180) {
+              sName=noteNames[sampleMap.freq];
             }
             sName+=fmt::sprintf("##SN%d",i);
             ImGui::PushFont(patFont);
@@ -3954,12 +3965,12 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
           ImGui::PushID(i+2);
           ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
           if (ImGui::BeginCombo("##SMSample",prevName.c_str())) {
-            if (ImGui::Selectable("---")) {
+            if (ImGui::Selectable("---",sampleMap.map==-1)) {
               sampleMap.map=-1;
             }
             for (int k=0; k<e->song.sampleLen; k++) {
               String itemName=fmt::sprintf("%d: %s",k,e->song.sample[k]->name);
-              if (ImGui::Selectable(itemName.c_str())) {
+              if (ImGui::Selectable(itemName.c_str(),sampleMap.map==k)) {
                 sampleMap.map=k;
               }
             }
@@ -3978,19 +3989,19 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
       ImGui::OpenPopup("SampleMapUtils");
     }
     if (ImGui::BeginPopup("SampleMapUtils",ImGuiWindowFlags_NoMove|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoSavedSettings)) {
-      if (sampleMapSelStart==sampleMapSelEnd && sampleMapSelStart>=0 && sampleMapSelStart<120) {
+      if (sampleMapSelStart==sampleMapSelEnd && sampleMapSelStart>=0 && sampleMapSelStart<180) {
         if (ins->type==DIV_INS_NES) {
           if (ImGui::MenuItem(_("set entire map to this pitch"))) {
-            if (sampleMapSelStart>=0 && sampleMapSelStart<120) {
-              for (int i=0; i<120; i++) {
+            if (sampleMapSelStart>=0 && sampleMapSelStart<180) {
+              for (int i=0; i<180; i++) {
                 if (i==sampleMapSelStart) continue;
                 ins->amiga.noteMap[i].dpcmFreq=ins->amiga.noteMap[sampleMapSelStart].dpcmFreq;
               }
             }
           }
           if (ImGui::MenuItem(_("set entire map to this delta counter value"))) {
-            if (sampleMapSelStart>=0 && sampleMapSelStart<120) {
-              for (int i=0; i<120; i++) {
+            if (sampleMapSelStart>=0 && sampleMapSelStart<180) {
+              for (int i=0; i<180; i++) {
                 if (i==sampleMapSelStart) continue;
                 ins->amiga.noteMap[i].dpcmDelta=ins->amiga.noteMap[sampleMapSelStart].dpcmDelta;
               }
@@ -3998,8 +4009,8 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
           }
         } else {
           if (ImGui::MenuItem(_("set entire map to this note"))) {
-            if (sampleMapSelStart>=0 && sampleMapSelStart<120) {
-              for (int i=0; i<120; i++) {
+            if (sampleMapSelStart>=0 && sampleMapSelStart<180) {
+              for (int i=0; i<180; i++) {
                 if (i==sampleMapSelStart) continue;
                 ins->amiga.noteMap[i].freq=ins->amiga.noteMap[sampleMapSelStart].freq;
               }
@@ -4007,8 +4018,8 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
           }
         }
         if (ImGui::MenuItem(_("set entire map to this sample"))) {
-          if (sampleMapSelStart>=0 && sampleMapSelStart<120) {
-            for (int i=0; i<120; i++) {
+          if (sampleMapSelStart>=0 && sampleMapSelStart<180) {
+            for (int i=0; i<180; i++) {
               if (i==sampleMapSelStart) continue;
               ins->amiga.noteMap[i].map=ins->amiga.noteMap[sampleMapSelStart].map;
             }
@@ -4017,24 +4028,24 @@ void FurnaceGUI::insTabSample(DivInstrument* ins) {
       }
       if (ins->type==DIV_INS_NES) {
         if (ImGui::MenuItem(_("reset pitches"))) {
-          for (int i=0; i<120; i++) {
+          for (int i=0; i<180; i++) {
             ins->amiga.noteMap[i].dpcmFreq=15;
           }
         }
         if (ImGui::MenuItem(_("clear delta counter values"))) {
-          for (int i=0; i<120; i++) {
+          for (int i=0; i<180; i++) {
             ins->amiga.noteMap[i].dpcmDelta=-1;
           }
         }
       } else {
         if (ImGui::MenuItem(_("reset notes"))) {
-          for (int i=0; i<120; i++) {
+          for (int i=0; i<180; i++) {
             ins->amiga.noteMap[i].freq=i;
           }
         }
       }
       if (ImGui::MenuItem(_("clear map samples"))) {
-        for (int i=0; i<120; i++) {
+        for (int i=0; i<180; i++) {
           ins->amiga.noteMap[i].map=-1;
         }
       }
@@ -4380,19 +4391,21 @@ void FurnaceGUI::insTabFM(DivInstrument* ins) {
                     if (!isPresent[j]) continue;
                     ImGui::TableNextColumn();
                     ImGui::PushID(j*17+i);
-                    if (ImGui::Selectable(_(opllInsNames[j][i]))) {
+                    if (ImGui::Selectable(_(opllInsNames[j][i]),ins->fm.opllPreset==i)) { PARAMETER
                       ins->fm.opllPreset=i;
                     }
                     ImGui::PopID();
+                    if (ins->fm.opllPreset==i) ImGui::SetItemDefaultFocus();
                   }
                 }
                 ImGui::EndTable();
               }
             } else {
               for (int i=0; i<17; i++) {
-                if (ImGui::Selectable(_(opllInsNames[presentWhich][i]))) {
+                if (ImGui::Selectable(_(opllInsNames[presentWhich][i]),ins->fm.opllPreset==i)) { PARAMETER
                   ins->fm.opllPreset=i;
                 }
+                if (ins->fm.opllPreset==i) ImGui::SetItemDefaultFocus();
               }
             }
             ImGui::EndCombo();
@@ -5301,6 +5314,7 @@ void FurnaceGUI::insTabFM(DivInstrument* ins) {
             }
 
             ImGui::SetCursorPos(prevCurPos);
+            ImGui::Dummy(ImVec2(0,0));
             
             ImGui::TableNextColumn();
             switch (ins->type) {
@@ -8688,6 +8702,8 @@ void FurnaceGUI::drawInsEdit() {
               macroList.push_back(FurnaceGUIMacroDesc(_("Waveform"),&ins->std.waveMacro,0,waveCount,160,uiColors[GUI_COLOR_MACRO_WAVE],false,NULL,NULL,false,NULL));
               macroList.push_back(FurnaceGUIMacroDesc(_("Panning (left)"),&ins->std.panLMacro,0,15,46,uiColors[GUI_COLOR_MACRO_OTHER],false,NULL));
               macroList.push_back(FurnaceGUIMacroDesc(_("Panning (right)"),&ins->std.panRMacro,0,15,46,uiColors[GUI_COLOR_MACRO_OTHER]));
+              macroList.push_back(FurnaceGUIMacroDesc(_("Panning (rear left)"),&ins->std.ex1Macro,0,15,46,uiColors[GUI_COLOR_MACRO_OTHER],false,NULL));
+              macroList.push_back(FurnaceGUIMacroDesc(_("Panning (rear right)"),&ins->std.ex2Macro,0,15,46,uiColors[GUI_COLOR_MACRO_OTHER]));
               macroList.push_back(FurnaceGUIMacroDesc(_("Pitch"),&ins->std.pitchMacro,-2048,2047,160,uiColors[GUI_COLOR_MACRO_PITCH],true,macroRelativeMode));
               break;
             case DIV_INS_OPL_DRUMS:
