@@ -18,6 +18,7 @@
  */
 
 #include "../fileutils.h"
+#include <cstring>
 
 // the only implementation for now
 class TAFilePOSIX: public TAFile {
