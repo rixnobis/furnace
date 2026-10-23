@@ -1,10 +1,13 @@
 // Ours. Headless positive/negative control for DivPlatformPS1.
 // Instantiates the platform directly with a bare DivEngine (never init()ed) as parent,
 // holding one 44100 Hz 1 kHz sine sample and one Amiga-type instrument.
-// usage: ps1spu_test <on|off|two|time> <out.wav>
+// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan> <out.wav>
 //   on/off: one instance, note on / no note, 0.5 s
 //   two:    instances A (note on) and B (no note) rendered alternately, tick by tick, 0.5 s
 //   time:   one instance, note on, 10 s, prints the wall time of the render loop
+//   fmt:    DIV_INS_PS1 instrument serialize/deserialize round trip (+ negative control)
+//   adsr:   fast vs slow attack, then release after note off
+//   pan:    full left vs full right
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,8 +70,143 @@ static void report(const char* tag, const std::vector<short>& outL, const std::v
     tag,(unsigned)total,rms,peak,zcHz,bestP>0?bestHz:0.0,lrSame,wavPath);
 }
 
+static void hexdump(const char* tag, const unsigned char* b, size_t off, size_t len) {
+  printf("%s @%u:",tag,(unsigned)off);
+  for (size_t i=0; i<len; i++) printf(" %02x",b[off+i]);
+  printf("\n");
+}
+
+static bool samePS1(const DivInstrument& a, const DivInstrument& b) {
+  const DivInstrumentPS1& x=a.ps1;
+  const DivInstrumentPS1& y=b.ps1;
+  bool ok=true;
+#define CHK(f) if (x.f!=y.f) { printf("  MISMATCH %s: %d != %d\n",#f,(int)x.f,(int)y.f); ok=false; }
+  CHK(ar) CHK(arExp) CHK(dr) CHK(sl) CHK(sr) CHK(srDec) CHK(srExp) CHK(rr) CHK(rrExp)
+  CHK(reverb) CHK(noise) CHK(pitchMod)
+#undef CHK
+  if (a.type!=b.type) { printf("  MISMATCH type: %d != %d\n",(int)a.type,(int)b.type); ok=false; }
+  if (a.name!=b.name) { printf("  MISMATCH name\n"); ok=false; }
+  return ok;
+}
+
+static int fmtArm() {
+  DivInstrument a;
+  a.type=DIV_INS_PS1;
+  a.name="psx";
+  a.ps1.ar=60; a.ps1.arExp=true; a.ps1.dr=9; a.ps1.sl=5;
+  a.ps1.sr=77; a.ps1.srDec=true; a.ps1.srExp=true; a.ps1.rr=21; a.ps1.rrExp=true;
+  a.ps1.reverb=true; a.ps1.noise=false; a.ps1.pitchMod=true;
+  printf("in-memory DIV_INS_PS1=%d ADSR1=%04x ADSR2=%04x\n",(int)DIV_INS_PS1,a.ps1.getADSR1(),a.ps1.getADSR2());
+
+  SafeWriter w;
+  w.init();
+  a.putInsData2(&w,false);
+  unsigned char* buf=w.getFinalBuf();
+  size_t len=w.size();
+  printf("serialized INS2 block: %u bytes\n",(unsigned)len);
+  // INS2 | len(4) | version(2) | type(2) | features...
+  hexdump("type field",buf,10,2);
+  unsigned short fileType=buf[10]|(buf[11]<<8);
+  bool typeOK=fileType==DIV_INS_FILE_PS1;
+  printf("on-disk type=0x%04x (expect 0x7e00): %s\n",fileType,typeOK?"OK":"FAIL");
+  size_t psOff=0, pos=12;
+  while (pos+4<=len) {
+    if (buf[pos]=='E' && buf[pos+1]=='N') break;
+    unsigned short fl=buf[pos+2]|(buf[pos+3]<<8);
+    if (buf[pos]=='p' && buf[pos+1]=='s') { psOff=pos; hexdump("\"ps\" feature",buf,pos,4+fl); }
+    pos+=4+fl;
+  }
+  if (psOff==0) { printf("FAIL: no ps feature\n"); return 1; }
+
+  DivInstrument b;
+  {
+    SafeReader r(buf,len);
+    b.readInsData(r,DIV_ENGINE_VERSION,NULL);
+  }
+  bool rtOK=samePS1(a,b);
+  printf("round trip: %s\n",rtOK?"all fields equal":"FAIL");
+
+  // negative control: flip a bit in the ADSR1 payload (sustain level).
+  std::vector<unsigned char> bad(buf,buf+len);
+  bad[psOff+5]^=0x01;
+  printf("negative control: flip byte @%u %02x->%02x\n",(unsigned)(psOff+5),buf[psOff+5],bad[psOff+5]);
+  DivInstrument c;
+  {
+    SafeReader r(bad.data(),len);
+    c.readInsData(r,DIV_ENGINE_VERSION,NULL);
+  }
+  bool caught=!samePS1(a,c);
+  printf("negative control: %s\n",caught?"mismatch caught":"FAIL (not caught)");
+
+  // future version: payload v2 with extra trailing bytes must still read v1 fields
+  std::vector<unsigned char> fut;
+  fut.insert(fut.end(),buf,buf+psOff+2);
+  unsigned short fl=buf[psOff+2]|(buf[psOff+3]<<8);
+  unsigned short nfl=fl+3;
+  fut.push_back(nfl&0xff); fut.push_back(nfl>>8);
+  fut.insert(fut.end(),buf+psOff+4,buf+psOff+4+fl);
+  fut[psOff+4]=2; // version 2
+  fut.push_back(0xaa); fut.push_back(0xbb); fut.push_back(0xcc);
+  fut.insert(fut.end(),buf+psOff+4+fl,buf+len);
+  unsigned int blk=fut.size()-8; // INS2 block length field
+  memcpy(&fut[4],&blk,4);
+  DivInstrument d;
+  {
+    SafeReader r(fut.data(),fut.size());
+    d.readInsData(r,DIV_ENGINE_VERSION,NULL);
+  }
+  bool futOK=samePS1(a,d);
+  printf("future ps v2 (+3 unknown bytes): %s\n",futOK?"v1 fields equal, rest skipped":"FAIL");
+
+  // helper mapping
+  bool mapOK=insTypeFromFile(DIV_INS_FILE_PS1)==DIV_INS_PS1 &&
+    insTypeToFile(DIV_INS_AMIGA)==DIV_INS_AMIGA && insTypeFromFile(DIV_INS_KLATTSCH)==DIV_INS_KLATTSCH &&
+    insTypeFromFile((unsigned short)DIV_INS_PS1)!=DIV_INS_PS1 &&
+    insTypeToFile(insTypeFromFile((unsigned short)DIV_INS_PS1))==(unsigned short)DIV_INS_PS1;
+  printf("type helpers (upstream pass-through, foreign %d kept distinct and written back): %s\n",(int)DIV_INS_PS1,mapOK?"OK":"FAIL");
+  w.finish();
+  return (typeOK && rtOK && caught && futOK && mapOK)?0:1;
+}
+
+static double rmsOf(const std::vector<short>& v, size_t from, size_t n) {
+  double s=0;
+  if (from>=v.size()) return 0;
+  if (from+n>v.size()) n=v.size()-from;
+  for (size_t i=from; i<from+n; i++) s+=(double)v[i]*v[i];
+  return n?sqrt(s/n):0;
+}
+
+// render total samples tick by tick; at sample offOffset (rounded up to a tick) send note off.
+// returns the sample index at which the note off tick happened.
+static size_t renderNote(DivEngine& e, DivPlatformPS1& ps1, int panL, int panR, size_t total, size_t offAt, std::vector<short>& L, std::vector<short>& R) {
+  const size_t tickLen=44100/60;
+  L.assign(total,0); R.assign(total,0);
+  ps1.init(&e,24,44100,DivConfig());
+  ps1.renderSamples(0);
+  ps1.dispatch(DivCommand(DIV_CMD_INSTRUMENT,0,0));
+  if (panL>=0) ps1.dispatch(DivCommand(DIV_CMD_PANNING,0,panL,panR));
+  ps1.dispatch(DivCommand(DIV_CMD_NOTE_ON,0,108));
+  size_t pos=0, offPos=0;
+  bool offSent=false;
+  while (pos<total) {
+    if (!offSent && pos>=offAt) {
+      ps1.dispatch(DivCommand(DIV_CMD_NOTE_OFF,0));
+      offSent=true;
+      offPos=pos;
+    }
+    ps1.tick(true);
+    size_t n=std::min(tickLen,total-pos);
+    short* bufs[2]={&L[pos],&R[pos]};
+    ps1.acquire(bufs,n);
+    pos+=n;
+  }
+  ps1.quit();
+  return offPos;
+}
+
 int main(int argc, char** argv) {
   const char* mode=argc>1?argv[1]:"on";
+  if (strcmp(mode,"fmt")==0) return fmtArm();
   bool noteOn=strcmp(mode,"off")!=0;
   bool two=strcmp(mode,"two")==0;
   bool timed=strcmp(mode,"time")==0;
@@ -90,6 +228,62 @@ int main(int argc, char** argv) {
   ins->amiga.initSample=0;
   e.song.ins.push_back(ins);
   e.song.insLen=1;
+
+  if (strcmp(mode,"adsr")==0) {
+    const size_t win=rate/20; // 50 ms
+    std::vector<short> L, R;
+    ins->type=DIV_INS_PS1;
+    ins->ps1.rr=10;
+    double rmsFast, rmsSlow;
+    {
+      DivPlatformPS1 p; ins->ps1.ar=0;
+      renderNote(e,p,-1,-1,rate/2,(size_t)-1,L,R);
+      rmsFast=rmsOf(L,0,win);
+      printf("attack ar=0  (ADSR1=%04x): RMS first 50 ms=%.1f, 400-450 ms=%.1f\n",ins->ps1.getADSR1(),rmsFast,rmsOf(L,rate*4/10,win));
+    }
+    {
+      DivPlatformPS1 p; ins->ps1.ar=60;
+      renderNote(e,p,-1,-1,rate/2,(size_t)-1,L,R);
+      rmsSlow=rmsOf(L,0,win);
+      printf("attack ar=60 (ADSR1=%04x): RMS first 50 ms=%.1f, 400-450 ms=%.1f  slow/fast=%.4f\n",ins->ps1.getADSR1(),rmsSlow,rmsOf(L,rate*4/10,win),rmsSlow/rmsFast);
+    }
+    {
+      DivPlatformPS1 p; ins->ps1.ar=0;
+      size_t offPos=renderNote(e,p,-1,-1,rate/2,rate/5,L,R);
+      // linear release, shift rr<=11: level drops by 8<<(11-rr) per sample from 0x7fff
+      double expMs=1000.0*(32767.0/(8<<(11-ins->ps1.rr)))/rate;
+      printf("release rr=%d linear (ADSR2=%04x): note off at sample %u; expected ~%.1f ms to 0\n",ins->ps1.rr,ins->ps1.getADSR2(),(unsigned)offPos,expMs);
+      printf("  RMS 10 ms before off=%.1f\n",rmsOf(L,offPos-rate/100,rate/100));
+      size_t silentAt=0;
+      for (size_t i=offPos; i<L.size(); i++) {
+        bool allZero=true;
+        for (size_t j=i; j<L.size(); j++) if (L[j]!=0) { allZero=false; break; }
+        if (allZero) { silentAt=i; break; }
+      }
+      for (int k=0; k<8; k++) printf("  +%2d..%2d ms RMS=%.1f\n",k*10,k*10+10,rmsOf(L,offPos+k*rate/100,rate/100));
+      printf("  output exactly 0 from %.1f ms after note off to end\n",1000.0*(silentAt-offPos)/rate);
+    }
+    return 0;
+  }
+  if (strcmp(mode,"pan")==0) {
+    std::vector<short> L, R;
+    {
+      DivPlatformPS1 p;
+      renderNote(e,p,255,0,rate/4,(size_t)-1,L,R);
+      printf("pan full left  (L=255 R=0): RMS(L)=%.1f RMS(R)=%.1f\n",rmsOf(L,0,L.size()),rmsOf(R,0,R.size()));
+    }
+    {
+      DivPlatformPS1 p;
+      renderNote(e,p,0,255,rate/4,(size_t)-1,L,R);
+      printf("pan full right (L=0 R=255): RMS(L)=%.1f RMS(R)=%.1f\n",rmsOf(L,0,L.size()),rmsOf(R,0,R.size()));
+    }
+    {
+      DivPlatformPS1 p;
+      renderNote(e,p,-1,-1,rate/4,(size_t)-1,L,R);
+      printf("pan default (center): RMS(L)=%.1f RMS(R)=%.1f\n",rmsOf(L,0,L.size()),rmsOf(R,0,R.size()));
+    }
+    return 0;
+  }
 
   DivPlatformPS1 ps1, ps1b;
   DivConfig flags;
