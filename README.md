@@ -1,5 +1,9 @@
 # Furnace (chiptune tracker)
 
+> **this is a fork.** it adds a Sony PlayStation (PS1) SPU system to Furnace, emulated with the SPU core from [PCSX-Redux](https://github.com/grumpycoders/pcsx-redux): 24 voices, ADPCM samples, hardware ADSR and panning. the work lives on the `ps1` branch (the default here), and builds are on this fork's [Releases](https://github.com/rixnobis/furnace/releases) page as `ps1-preview-*`. not there yet: reverb, noise, pitch modulation and SPU dump export.
+>
+> report PS1 problems on this fork's issues. everything below is upstream's README, unchanged.
+
 ![screenshot](papers/screenshot3.png)
 
 the biggest multi-system chiptune tracker ever made!
