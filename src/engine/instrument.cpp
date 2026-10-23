@@ -893,7 +893,39 @@ bool DivInstrumentKlattsch::operator==(const DivInstrumentKlattsch& other) {
   );
 }
 
+bool DivInstrumentPS1::operator==(const DivInstrumentPS1& other) {
+  return (
+    _C(ar) &&
+    _C(arExp) &&
+    _C(dr) &&
+    _C(sl) &&
+    _C(sr) &&
+    _C(srDec) &&
+    _C(srExp) &&
+    _C(rr) &&
+    _C(rrExp) &&
+    _C(reverb) &&
+    _C(noise) &&
+    _C(pitchMod)
+  );
+}
+
 #undef _C
+
+unsigned short insTypeToFile(DivInstrumentType t) {
+  if (t==DIV_INS_PS1) return DIV_INS_FILE_PS1;
+  // a foreign (upstream) type that collided with a fork-owned in-memory value
+  if ((t&0xff00)==DIV_INS_FILE_FOREIGN && (t&0xff)>=DIV_INS_PS1 && (t&0xff)<DIV_INS_MAX) return t&0xff;
+  return t;
+}
+
+DivInstrumentType insTypeFromFile(unsigned short v) {
+  if (v==DIV_INS_FILE_PS1) return DIV_INS_PS1;
+  // an upstream type newer than this fork knows, numerically equal to a fork-owned in-memory
+  // value: keep it as an unknown type so it is not mistaken for ours, and written back as v.
+  if (v>=DIV_INS_PS1 && v<DIV_INS_MAX) return (DivInstrumentType)(DIV_INS_FILE_FOREIGN|v);
+  return (DivInstrumentType)v;
+}
 
 #define CONSIDER(x,t) \
   case t: \
@@ -1746,6 +1778,18 @@ void DivInstrument::writeFeatureKT(SafeWriter* w) {
   FEATURE_END;
 }
 
+// fork-owned feature: lowercase code, outside upstream's uppercase/digit code space.
+void DivInstrument::writeFeaturePS(SafeWriter* w) {
+  FEATURE_BEGIN("ps");
+
+  w->writeC(PS1_INS_FORMAT_VERSION);
+  w->writeS(ps1.getADSR1());
+  w->writeS(ps1.getADSR2());
+  w->writeC((ps1.reverb?1:0)|(ps1.noise?2:0)|(ps1.pitchMod?4:0));
+
+  FEATURE_END;
+}
+
 void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bool insName) {
   size_t blockStartSeek=0;
   size_t blockEndSeek=0;
@@ -1766,8 +1810,7 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
   }
 
   w->writeS(DIV_ENGINE_VERSION);
-  w->writeC(type);
-  w->writeC(0);
+  w->writeS(insTypeToFile(type));
 
   // write features
   bool featureNA=false;
@@ -1794,6 +1837,7 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
   bool featureS2=false;
   bool featureS3=false;
   bool featureKT=false;
+  bool featurePS=(type==DIV_INS_PS1);
 
   bool checkForWL=false;
 
@@ -2053,6 +2097,10 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
         break;
       case DIV_INS_UPD1771C:
         break;
+      case DIV_INS_PS1:
+        featureSM=true;
+        featureSL=true;
+        break;
       case DIV_INS_MAX:
         break;
       case DIV_INS_NULL:
@@ -2273,6 +2321,9 @@ void DivInstrument::putInsData2(SafeWriter* w, bool fui, const DivSong* song, bo
   }
   if (featureKT) {
     writeFeatureKT(w);
+  }
+  if (featurePS) {
+    writeFeaturePS(w);
   }
 
   if (fui && (featureSL || featureWL)) {
@@ -3402,6 +3453,29 @@ void DivInstrument::readFeatureKT(SafeReader& reader, short version) {
   READ_FEAT_END;
 }
 
+void DivInstrument::readFeaturePS(SafeReader& reader, short version) {
+  READ_FEAT_BEGIN;
+
+  unsigned char psVersion=0;
+  if (reader.tell()<endOfFeat) psVersion=reader.readC();
+  if (psVersion>PS1_INS_FORMAT_VERSION) {
+    logW("PS1 instrument data version %d is newer than %d; reading what is known",psVersion,PS1_INS_FORMAT_VERSION);
+  }
+  // version 1 fields. a newer version only appends; whatever follows is skipped below.
+  if (psVersion>=1) {
+    if (reader.tell()+2<=endOfFeat) ps1.setADSR1(reader.readS());
+    if (reader.tell()+2<=endOfFeat) ps1.setADSR2(reader.readS());
+    if (reader.tell()<endOfFeat) {
+      unsigned char flags=reader.readC();
+      ps1.reverb=flags&1;
+      ps1.noise=flags&2;
+      ps1.pitchMod=flags&4;
+    }
+  }
+
+  READ_FEAT_END;
+}
+
 DivDataErrors DivInstrument::readInsDataNew(SafeReader& reader, short version, bool fui, DivSong* song) {
   unsigned char featCode[2];
   bool volIsCutoff=false;
@@ -3416,7 +3490,7 @@ DivDataErrors DivInstrument::readInsDataNew(SafeReader& reader, short version, b
 
   reader.readS(); // format version. ignored.
 
-  type=(DivInstrumentType)reader.readS();
+  type=insTypeFromFile(reader.readS());
 
   // feature reading loop
   while ((int)reader.tell()<dataLen) {
@@ -3484,6 +3558,8 @@ DivDataErrors DivInstrument::readInsDataNew(SafeReader& reader, short version, b
       readFeatureS3(reader,version);
     } else if (memcmp(featCode,"KT",2)==0) { // Klattsch
       readFeatureKT(reader,version);
+    } else if (memcmp(featCode,"ps",2)==0) { // PS1 (fork-owned)
+      readFeaturePS(reader,version);
     } else {
       if (song==NULL && (memcmp(featCode,"SL",2)==0 || (memcmp(featCode,"WL",2)==0) || (memcmp(featCode,"LS",2)==0) || (memcmp(featCode,"LW",2)==0))) {
         // nothing
@@ -3539,7 +3615,7 @@ DivDataErrors DivInstrument::readInsDataOld(SafeReader &reader, short version) {
   reader.readI(); // length. ignored.
 
   reader.readS(); // format version. ignored.
-  type=(DivInstrumentType)reader.readC();
+  type=insTypeFromFile(reader.readC());
   reader.readC();
   name=reader.readString();
 

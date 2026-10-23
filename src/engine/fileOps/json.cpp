@@ -299,7 +299,7 @@ JSON serializeInstrument(DivInstrument* ins) {
   JSON json;
   if (!ins->name.empty())
     json["name"]=ins->name;
-  json["type"]=ins->type;
+  json["type"]=insTypeToFile(ins->type);
 
   bool featureFM=false;
   bool featureMA=false;
@@ -417,6 +417,7 @@ JSON serializeInstrument(DivInstrument* ins) {
     case DIV_INS_GBA_DMA:
     case DIV_INS_GBA_MINMOD:
     case DIV_INS_SUPERVISION:
+    case DIV_INS_PS1:
       featureSM=true;
       break;
     case DIV_INS_SM8521:
