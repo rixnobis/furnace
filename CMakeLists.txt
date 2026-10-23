@@ -1060,6 +1060,7 @@ src/gui/insEdit/pet.cpp
 src/gui/insEdit/pokemini.cpp
 src/gui/insEdit/pokey.cpp
 src/gui/insEdit/powernoise.cpp
+src/gui/insEdit/ps1.cpp
 src/gui/insEdit/powernoiseslope.cpp
 src/gui/insEdit/pv1000.cpp
 src/gui/insEdit/qsound.cpp
