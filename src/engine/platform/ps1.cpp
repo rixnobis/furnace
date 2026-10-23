@@ -23,7 +23,8 @@
 
 // the SPU pitch register is a 4.12 step at 44.1 kHz: 0x1000 plays a sample at 44100 Hz.
 #define CHIP_FREQBASE 4096
-#define PS1_MAX_PITCH 0x3fff
+// the hardware clips any step above 0x4000 to 0x4000 (176.4 kHz).
+#define PS1_MAX_PITCH 0x4000
 
 // SPU RAM 0x00000-0x00fff holds the CD and voice 1/3 capture buffers, written by the
 // hardware all the time. samples go after them.
