@@ -25,15 +25,26 @@
 #include "sound/ps1spu/bridge.h"
 
 // Sony PlayStation SPU, emulated by the pcsx-redux core (sound/ps1spu).
-// minimal: note on/off with samples. everything else is not implemented yet.
+// note on/off with samples, per-instrument ADSR, volume, panning, and the per-voice
+// reverb/noise/pitch-mod enable bits. everything else is not implemented yet.
 class DivPlatformPS1: public DivDispatch {
   struct Channel: public SharedChannel {
     int sample;
     bool volumeChanged;
+    unsigned char panL, panR;
+    unsigned short adsr1, adsr2;
+    bool reverb, noise, pitchMod;
     Channel(bool linear=true):
       SharedChannel(127,linear),
       sample(-1),
-      volumeChanged(false) {}
+      volumeChanged(false),
+      panL(255),
+      panR(255),
+      adsr1(0x000f),
+      adsr2(0x0008),
+      reverb(false),
+      noise(false),
+      pitchMod(false) {}
   };
   Channel chan[24];
   DivDispatchOscBuffer* oscBuf[24];
@@ -48,6 +59,8 @@ class DivPlatformPS1: public DivDispatch {
   bool* sampleLoaded;
   DivMemoryComposition memCompo;
   unsigned short regPool[256];
+  // per-voice enable bits (bit n = voice n), as last written to PMON/NON/EON.
+  unsigned int pmonMask, nonMask, eonMask;
 
   friend void putDispatchChip(void*,int);
   friend void putDispatchChan(void*,int,int);
@@ -55,6 +68,7 @@ class DivPlatformPS1: public DivDispatch {
   void spuWrite(unsigned int addr, unsigned short val);
   void voiceWrite(int ch, unsigned int reg, unsigned short val);
   void uploadSamples();
+  void writeMask(unsigned int regLo, unsigned int& mask, int ch, bool on, bool force=false);
   public:
     void acquire(short** buf, size_t len);
     int dispatch(DivCommand c);

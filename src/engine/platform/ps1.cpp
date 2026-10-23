@@ -42,6 +42,11 @@
 #define PS1_KON_HI 0xd8a
 #define PS1_KOFF_LO 0xd8c
 #define PS1_KOFF_HI 0xd8e
+#define PS1_PMON_LO 0xd90
+#define PS1_NON_LO 0xd94
+#define PS1_EON_LO 0xd98
+// fixed (direct) volume mode: bit 15 must stay clear (it selects sweep mode).
+#define PS1_VOL_MAX 0x3fff
 
 void DivPlatformPS1::spuWrite(unsigned int addr, unsigned short val) {
   if (skipRegisterWrites) return;
@@ -53,6 +58,18 @@ void DivPlatformPS1::spuWrite(unsigned int addr, unsigned short val) {
 
 void DivPlatformPS1::voiceWrite(int ch, unsigned int reg, unsigned short val) {
   spuWrite(0xc00+(ch<<4)+reg,val);
+}
+
+// update bit ch of a 24-bit voice mask register pair (lo: voices 0-15, lo+2: voices 16-23).
+void DivPlatformPS1::writeMask(unsigned int regLo, unsigned int& mask, int ch, bool on, bool force) {
+  unsigned int newMask=on?(mask|(1U<<ch)):(mask&~(1U<<ch));
+  if (newMask==mask && !force) return;
+  mask=newMask;
+  if (ch<16) {
+    spuWrite(regLo,mask&0xffff);
+  } else {
+    spuWrite(regLo+2,(mask>>16)&0xff);
+  }
 }
 
 void DivPlatformPS1::acquire(short** buf, size_t len) {
@@ -91,9 +108,9 @@ void DivPlatformPS1::tick(bool sysTick) {
       chan[i].freqChanged=true;
     }
     if (chan[i].volumeChanged) {
-      unsigned short v=isMuted[i]?0:(unsigned short)((chan[i].outVol*0x3fff)/127);
-      voiceWrite(i,PS1_VOL_L,v);
-      voiceWrite(i,PS1_VOL_R,v);
+      int v=isMuted[i]?0:(chan[i].outVol*PS1_VOL_MAX)/127;
+      voiceWrite(i,PS1_VOL_L,(unsigned short)((v*chan[i].panL)/255));
+      voiceWrite(i,PS1_VOL_R,(unsigned short)((v*chan[i].panR)/255));
       chan[i].volumeChanged=false;
     }
     if (chan[i].freqChanged || chan[i].keyOn || chan[i].keyOff) {
@@ -105,10 +122,12 @@ void DivPlatformPS1::tick(bool sysTick) {
         int s=chan[i].sample;
         if (s>=0 && s<parent->song.sampleLen && sampleLoaded[s]) {
           voiceWrite(i,PS1_START,sampleOff[s]>>3);
-          // fixed envelope for now: fastest linear attack, sustain level max (no decay),
-          // sustain holds at max, fast linear release.
-          voiceWrite(i,PS1_ADSR1,0x000f);
-          voiceWrite(i,PS1_ADSR2,0x0008);
+          voiceWrite(i,PS1_ADSR1,chan[i].adsr1);
+          voiceWrite(i,PS1_ADSR2,chan[i].adsr2);
+          // voice 0 cannot be pitch-modulated (there is no voice before it).
+          writeMask(PS1_PMON_LO,pmonMask,i,chan[i].pitchMod && i>0);
+          writeMask(PS1_NON_LO,nonMask,i,chan[i].noise);
+          writeMask(PS1_EON_LO,eonMask,i,chan[i].reverb);
           spuWrite((i<16)?PS1_KON_LO:PS1_KON_HI,1<<(i&15));
         }
       }
@@ -125,7 +144,15 @@ void DivPlatformPS1::tick(bool sysTick) {
 int DivPlatformPS1::dispatch(DivCommand c) {
   switch (c.cmd) {
     case DIV_CMD_NOTE_ON: {
-      DivInstrument* ins=parent->getIns(chan[c.chan].ins,DIV_INS_AMIGA);
+      DivInstrument* ins=parent->getIns(chan[c.chan].ins,DIV_INS_PS1);
+      // the envelope comes from a PS1 instrument; any other type (e.g. Amiga) gets the defaults.
+      DivInstrumentPS1 env;
+      if (ins->type==DIV_INS_PS1) env=ins->ps1;
+      chan[c.chan].adsr1=env.getADSR1();
+      chan[c.chan].adsr2=env.getADSR2();
+      chan[c.chan].reverb=env.reverb;
+      chan[c.chan].noise=env.noise;
+      chan[c.chan].pitchMod=env.pitchMod;
       if (c.value!=DIV_NOTE_NULL) {
         chan[c.chan].sample=ins->amiga.getSample(c.value);
         chan[c.chan].pitchTable=samplePitchTable.get(chan[c.chan].sample);
@@ -178,6 +205,11 @@ int DivPlatformPS1::dispatch(DivCommand c) {
         return chan[c.chan].vol;
       }
       return chan[c.chan].outVol;
+      break;
+    case DIV_CMD_PANNING:
+      chan[c.chan].panL=c.value;
+      chan[c.chan].panR=c.value2;
+      chan[c.chan].volumeChanged=true;
       break;
     case DIV_CMD_PITCH:
       chan[c.chan].pitch=c.value;
@@ -242,6 +274,13 @@ int DivPlatformPS1::getRegisterPoolDepth() {
 void DivPlatformPS1::reset() {
   memset(regPool,0,sizeof(regPool));
   spu->reset();
+  pmonMask=0;
+  nonMask=0;
+  eonMask=0;
+  for (unsigned int r: {PS1_PMON_LO,PS1_NON_LO,PS1_EON_LO}) {
+    spuWrite(r,0);
+    spuWrite(r+2,0);
+  }
   for (int i=0; i<24; i++) {
     chan[i]=DivPlatformPS1::Channel(parent->song.compatFlags.linearPitch);
     chan[i].pitchTable=samplePitchTable.get(-1);
@@ -387,7 +426,10 @@ DivPlatformPS1::DivPlatformPS1():
   DivDispatch(),
   spu(NULL),
   sampleMem(NULL),
-  sampleMemLen(0) {
+  sampleMemLen(0),
+  pmonMask(0),
+  nonMask(0),
+  eonMask(0) {
   sampleOff=new unsigned int[32768];
   sampleLoaded=new bool[32768];
   memset(sampleOff,0,32768*sizeof(unsigned int));
