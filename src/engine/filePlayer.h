@@ -22,6 +22,7 @@
 
 #include "../ta-utils.h"
 #include "../timeutils.h"
+#include <limits.h>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
