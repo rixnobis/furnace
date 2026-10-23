@@ -3288,6 +3288,7 @@ class FurnaceGUI {
   void insEditSCV(DivInstrument* ins);
   void insEditSID3(DivInstrument* ins);
   void insEditKlattsch(DivInstrument* ins);
+  void insEditPS1(DivInstrument* ins);
 
   // orders
   void drawOrderButtons();

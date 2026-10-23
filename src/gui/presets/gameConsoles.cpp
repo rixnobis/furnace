@@ -201,6 +201,11 @@ void initSystemPresetsGameConsoles(std::vector<FurnaceGUISysCategory>& sysCatego
       }
     );
   ENTRY(
+    _("Sony PlayStation"), {
+      CH(DIV_SYSTEM_PS1, 1.0f, 0, "")
+    }
+  );
+  ENTRY(
     _("Mattel Intellivision"), {
       CH(DIV_SYSTEM_AY8910, 1.0f, 0, "chipType=3")
     }
