@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 
+// Each instance is a self-contained core, run synchronously on the calling thread (no mixer
+// thread). One instance must not be called from two threads at once; distinct instances may.
 class PS1SPUBridge {
   struct Impl;
   Impl* p;

@@ -1,10 +1,14 @@
 // Ours. Headless positive/negative control for DivPlatformPS1.
 // Instantiates the platform directly with a bare DivEngine (never init()ed) as parent,
 // holding one 44100 Hz 1 kHz sine sample and one Amiga-type instrument.
-// usage: ps1spu_test <on|off> <out.wav>
+// usage: ps1spu_test <on|off|two|time> <out.wav>
+//   on/off: one instance, note on / no note, 0.5 s
+//   two:    instances A (note on) and B (no note) rendered alternately, tick by tick, 0.5 s
+//   time:   one instance, note on, 10 s, prints the wall time of the render loop
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <vector>
 #include "../../../engine.h"
 #include "../../ps1.h"
@@ -31,56 +35,9 @@ static void writeWav(const char* path, const std::vector<short>& l, const std::v
   fclose(f);
 }
 
-int main(int argc, char** argv) {
-  bool noteOn=!(argc>1 && strcmp(argv[1],"off")==0);
-  const char* wavPath=argc>2?argv[2]:"ps1test.wav";
-  const int rate=44100;
-
-  DivEngine e;
-  DivSample* s=new DivSample;
-  s->depth=DIV_SAMPLE_DEPTH_16BIT;
-  s->centerRate=rate;
-  s->init(rate); // one second
-  for (unsigned int i=0; i<s->samples; i++) {
-    s->data16[i]=(short)round(16000.0*sin(2.0*M_PI*1000.0*i/rate));
-  }
-  e.song.sample.push_back(s);
-  e.song.sampleLen=1;
-  DivInstrument* ins=new DivInstrument;
-  ins->type=DIV_INS_AMIGA;
-  ins->amiga.initSample=0;
-  e.song.ins.push_back(ins);
-  e.song.insLen=1;
-
-  DivPlatformPS1 ps1;
-  DivConfig flags;
-  ps1.init(&e,24,rate,flags);
-  ps1.renderSamples(0);
-  printf("arm=%s sampleMemUsage=%u loaded=%d\n",noteOn?"on":"off",(unsigned)ps1.getSampleMemUsage(0),ps1.isSampleLoaded(0,0));
-
-  ps1.dispatch(DivCommand(DIV_CMD_INSTRUMENT,0,0));
-  if (noteOn) ps1.dispatch(DivCommand(DIV_CMD_NOTE_ON,0,108)); // C-4: the sample plays at its center rate
-
-  const size_t total=rate/2;
-  const size_t tickLen=rate/60;
-  std::vector<short> outL(total), outR(total);
-  size_t pos=0;
-  bool first=true;
-  while (pos<total) {
-    ps1.tick(true);
-    if (first) {
-      printf("chan0 freq(pitch reg)=%d (expect 4096 for C-4 on a 44100 Hz sample)\n",ps1.getChanState(0)->freq);
-      first=false;
-    }
-    size_t n=std::min(tickLen,total-pos);
-    short* bufs[2]={&outL[pos],&outR[pos]};
-    ps1.acquire(bufs,n);
-    pos+=n;
-  }
-  ps1.quit();
-  writeWav(wavPath,outL,outR,rate);
-
-  // measurements on the left channel (right is identical: same volume both sides)
+// measurements on the left channel (right is identical: same volume both sides)
+static void report(const char* tag, const std::vector<short>& outL, const std::vector<short>& outR, int rate, const char* wavPath) {
+  const size_t total=outL.size();
   double sumSq=0; int peak=0;
   for (size_t i=0; i<total; i++) {
     sumSq+=(double)outL[i]*outL[i];
@@ -106,7 +63,81 @@ int main(int argc, char** argv) {
     if (p>bestP) { bestP=p; bestHz=hz; }
   }
   bool lrSame=memcmp(outL.data(),outR.data(),total*sizeof(short))==0;
-  printf("frames=%u RMS=%.1f peak=%d zeroCrossHz=%.2f goertzelPeakHz=%.0f L==R:%d wav=%s\n",
-    (unsigned)total,rms,peak,zcHz,bestP>0?bestHz:0.0,lrSame,wavPath);
+  printf("%sframes=%u RMS=%.1f peak=%d zeroCrossHz=%.2f goertzelPeakHz=%.0f L==R:%d wav=%s\n",
+    tag,(unsigned)total,rms,peak,zcHz,bestP>0?bestHz:0.0,lrSame,wavPath);
+}
+
+int main(int argc, char** argv) {
+  const char* mode=argc>1?argv[1]:"on";
+  bool noteOn=strcmp(mode,"off")!=0;
+  bool two=strcmp(mode,"two")==0;
+  bool timed=strcmp(mode,"time")==0;
+  const char* wavPath=argc>2?argv[2]:"ps1test.wav";
+  const int rate=44100;
+
+  DivEngine e;
+  DivSample* s=new DivSample;
+  s->depth=DIV_SAMPLE_DEPTH_16BIT;
+  s->centerRate=rate;
+  s->init(rate); // one second
+  for (unsigned int i=0; i<s->samples; i++) {
+    s->data16[i]=(short)round(16000.0*sin(2.0*M_PI*1000.0*i/rate));
+  }
+  e.song.sample.push_back(s);
+  e.song.sampleLen=1;
+  DivInstrument* ins=new DivInstrument;
+  ins->type=DIV_INS_AMIGA;
+  ins->amiga.initSample=0;
+  e.song.ins.push_back(ins);
+  e.song.insLen=1;
+
+  DivPlatformPS1 ps1, ps1b;
+  DivConfig flags;
+  ps1.init(&e,24,rate,flags);
+  ps1.renderSamples(0);
+  if (two) {
+    ps1b.init(&e,24,rate,flags);
+    ps1b.renderSamples(0);
+    ps1b.dispatch(DivCommand(DIV_CMD_INSTRUMENT,0,0));
+  }
+  printf("arm=%s sampleMemUsage=%u loaded=%d\n",mode,(unsigned)ps1.getSampleMemUsage(0),ps1.isSampleLoaded(0,0));
+
+  ps1.dispatch(DivCommand(DIV_CMD_INSTRUMENT,0,0));
+  if (noteOn) ps1.dispatch(DivCommand(DIV_CMD_NOTE_ON,0,108)); // C-4: the sample plays at its center rate
+
+  const size_t total=timed?(size_t)rate*10:(size_t)rate/2;
+  const size_t tickLen=rate/60;
+  std::vector<short> outL(total), outR(total), bL(two?total:0), bR(two?total:0);
+  size_t pos=0;
+  bool first=true;
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC,&t0);
+  while (pos<total) {
+    ps1.tick(true);
+    if (two) ps1b.tick(true);
+    if (first) {
+      printf("chan0 freq(pitch reg)=%d (expect 4096 for C-4 on a 44100 Hz sample)\n",ps1.getChanState(0)->freq);
+      first=false;
+    }
+    size_t n=std::min(tickLen,total-pos);
+    short* bufs[2]={&outL[pos],&outR[pos]};
+    ps1.acquire(bufs,n);
+    if (two) {
+      short* bufsB[2]={&bL[pos],&bR[pos]};
+      ps1b.acquire(bufsB,n);
+    }
+    pos+=n;
+  }
+  clock_gettime(CLOCK_MONOTONIC,&t1);
+  ps1.quit();
+  if (two) ps1b.quit();
+  writeWav(wavPath,outL,outR,rate);
+
+  if (timed) {
+    double ms=(t1.tv_sec-t0.tv_sec)*1e3+(t1.tv_nsec-t0.tv_nsec)/1e6;
+    printf("rendered %.1f s of audio in %.1f ms wall\n",(double)total/rate,ms);
+  }
+  report(two?"A: ":"",outL,outR,rate,wavPath);
+  if (two) report("B: ",bL,bR,rate,"-");
   return 0;
 }
