@@ -913,6 +913,7 @@ src/engine/platform/gbaminmod.cpp
 src/engine/platform/nds.cpp
 src/engine/platform/bifurcator.cpp
 src/engine/platform/klattsch.cpp
+src/engine/platform/ps1.cpp
 src/engine/platform/sid2.cpp
 src/engine/platform/sid3.cpp
 src/engine/platform/multipcm.cpp
@@ -958,6 +959,44 @@ if (APPLE)
     list(APPEND ENGINE_SOURCES extern/macports-legacy-support/src/time.c)
   endif()
 endif()
+
+# PS1 SPU: the pcsx-redux core (vendored verbatim, C++20) behind a C++20 bridge.
+# everything else in Furnace stays C++14 and only includes bridge.h.
+set(PS1SPU_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/platform/sound/ps1spu)
+set(PS1SPU_VENDORED_SOURCES
+${PS1SPU_DIR}/spu/adpcm.cc
+${PS1SPU_DIR}/spu/adsr.cc
+${PS1SPU_DIR}/spu/dma.cc
+${PS1SPU_DIR}/spu/interpolation.cc
+${PS1SPU_DIR}/spu/noise.cc
+${PS1SPU_DIR}/spu/registers.cc
+${PS1SPU_DIR}/spu/reverb.cc
+${PS1SPU_DIR}/spu/spu.cc
+${PS1SPU_DIR}/spu/volume.cc
+${PS1SPU_DIR}/spu/xa.cc
+${PS1SPU_DIR}/supportpsx/adpcm.cc
+)
+set(PS1SPU_SOURCES
+${PS1SPU_VENDORED_SOURCES}
+${PS1SPU_DIR}/stubs/impl_stubs.cc
+${PS1SPU_DIR}/bridge.cpp
+)
+if (MSVC)
+  set(PS1SPU_STD_FLAG /std:c++20)
+else()
+  set(PS1SPU_STD_FLAG -std=c++20)
+endif()
+# SKIP_PRECOMPILE_HEADERS: Furnace's PCH is built as C++14 and cannot be used by these.
+set_source_files_properties(${PS1SPU_SOURCES} PROPERTIES
+  COMPILE_OPTIONS "${PS1SPU_STD_FLAG}"
+  INCLUDE_DIRECTORIES "${PS1SPU_DIR}/stubs;${PS1SPU_DIR}"
+  SKIP_PRECOMPILE_HEADERS ON
+)
+if (NOT MSVC)
+  # vendored files are never edited, so their warnings must not fail the build.
+  set_property(SOURCE ${PS1SPU_VENDORED_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -Wno-error)
+endif()
+list(APPEND ENGINE_SOURCES ${PS1SPU_SOURCES})
 
 set(CLI_SOURCES
 src/cli/cli.cpp
@@ -1534,3 +1573,18 @@ endif()
 target_compile_definitions(${FURNACE} PRIVATE ${DEPENDENCIES_DEFINES})
 
 message(STATUS "License: ${FURNACE_LICENSE}")
+
+# headless PS1 platform check (not built by default): cmake --build <dir> --target ps1spu_test
+add_executable(ps1spu_test EXCLUDE_FROM_ALL ${ENGINE_SOURCES} ${AUDIO_SOURCES} src/engine/platform/sound/ps1spu/test_ps1.cpp)
+target_include_directories(ps1spu_test SYSTEM PRIVATE ${DEPENDENCIES_INCLUDE_DIRS})
+target_compile_options(ps1spu_test PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS})
+target_compile_definitions(ps1spu_test PRIVATE ${DEPENDENCIES_DEFINES})
+target_link_libraries(ps1spu_test PRIVATE ${DEPENDENCIES_LIBRARIES})
+if (NOT "${CMAKE_VERSION}" VERSION_LESS "3.16")
+  # engine sources rely on the PCH for some system headers
+  target_precompile_headers(ps1spu_test PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/pch.h>)
+endif()
+if (PKG_CONFIG_FOUND AND NOT "${CMAKE_VERSION}" VERSION_LESS "3.13")
+  target_link_directories(ps1spu_test PRIVATE ${DEPENDENCIES_LIBRARY_DIRS})
+  target_link_options(ps1spu_test PRIVATE ${DEPENDENCIES_LINK_OPTIONS})
+endif()

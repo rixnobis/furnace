@@ -92,6 +92,7 @@
 #include "platform/nds.h"
 #include "platform/bifurcator.h"
 #include "platform/klattsch.h"
+#include "platform/ps1.h"
 #include "platform/sid2.h"
 #include "platform/sid3.h"
 #include "platform/multipcm.h"
@@ -734,6 +735,9 @@ void DivDispatchContainer::init(DivSystem sys, DivEngine* eng, int chanCount, do
       break;
     case DIV_SYSTEM_KLATTSCH:
       dispatch=new DivPlatformKlattsch;
+      break;
+    case DIV_SYSTEM_PS1:
+      dispatch=new DivPlatformPS1;
       break;
     case DIV_SYSTEM_PCM_DAC:
       dispatch=new DivPlatformPCMDAC;

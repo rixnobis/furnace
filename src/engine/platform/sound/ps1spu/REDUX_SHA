@@ -1,6 +1,6 @@
 pcsx-redux 7f37315bdebe50b6144bd3c27ec284eb000b1db2
-spu/ = src/spu: adpcm adsr externals gauss interface interpolation noise registers reverb spu types volume
+spu/ = src/spu: adpcm adsr dma externals gauss interface interpolation noise registers reverb spu types volume xa
 supportpsx/ = src/supportpsx: adpcm
-Copied verbatim at that commit. Left out: cfg dma debug freeze sdlaudio settings xa playbacklua.
+Copied verbatim at that commit. Left out: cfg debug freeze sdlaudio settings playbacklua (stubs/impl_stubs.cc defines the impl members from cfg/debug/freeze as no-ops).
 These files are C++20 (<span>, <bit>); Furnace is C++14, so they build per-source as C++20.
 support/ = src/support (at 31e2bbc488f4897b5e24c1457c457ed90aed61ea): protobuf.h typestring-wrapper.h table-generator.h, plus typestring.hh (from third_party/, included by the first two)
