@@ -212,6 +212,7 @@ const char* insTypes[DIV_INS_MAX+1][3]={
   {"NEC μPD1771C",ICON_FA_BAR_CHART,ICON_FUR_INS_UPD1771C},
   {"SID3",ICON_FA_KEYBOARD_O,ICON_FUR_INS_SID3},
   {"klattsch",ICON_FA_MICROPHONE,ICON_FUR_INS_KLATTSCH},
+  {"PlayStation",ICON_FA_VOLUME_UP,ICON_FUR_INS_AMIGA},
   {NULL,ICON_FA_QUESTION,ICON_FA_QUESTION}
 };
 
@@ -1121,6 +1122,7 @@ const FurnaceGUIColorDef guiColors[GUI_COLOR_MAX]={
   D(GUI_COLOR_INSTR_UPD1771C,_N("μPD1771C"),ImVec4(0.94f,0.52f,0.6f,1.0f)),
   D(GUI_COLOR_INSTR_SID3,_N("SID3"),ImVec4(0.6f,0.75f,0.6f,1.0f)),
   D(GUI_COLOR_INSTR_KLATTSCH,_N("klattsch"),ImVec4(1.0f,0.415f,0.0f,1.0f)),
+  D(GUI_COLOR_INSTR_PS1,_N("PlayStation"),ImVec4(0.55f,0.6f,0.9f,1.0f)),
   D(GUI_COLOR_INSTR_UNKNOWN,_N("Other/Unknown"),ImVec4(0.3f,0.3f,0.3f,1.0f)),
 
   D(GUI_COLOR_CHANNEL_BG,_N("Single color (background)"),ImVec4(0.4f,0.6f,0.8f,1.0f)),

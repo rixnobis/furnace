@@ -102,9 +102,23 @@ enum DivInstrumentType: unsigned short {
   DIV_INS_UPD1771C=65,
   DIV_INS_SID3=66,
   DIV_INS_KLATTSCH=67,
+  // fork-owned types go here, at the end. their in-memory values are NOT file values:
+  // always go through insTypeToFile()/insTypeFromFile() when (de)serializing a type.
+  DIV_INS_PS1,
   DIV_INS_MAX,
   DIV_INS_NULL
 };
+
+// on-disk instrument type values owned by this fork (outside upstream's range).
+#define DIV_INS_FILE_PS1 0x7E00
+// in memory, an upstream type read from a file whose number collides with a fork-owned
+// in-memory value is kept as DIV_INS_FILE_FOREIGN|value (an unknown type) and written back as-is.
+#define DIV_INS_FILE_FOREIGN 0x7F00
+
+// translate an in-memory instrument type to its on-disk value and back.
+// upstream values pass through unchanged.
+unsigned short insTypeToFile(DivInstrumentType t);
+DivInstrumentType insTypeFromFile(unsigned short v);
 
 enum DivMacroType: unsigned char {
   DIV_MACRO_VOL=0,
@@ -1067,6 +1081,63 @@ struct DivInstrumentKlattsch {
     formantShift(0) {}
 };
 
+// version byte at the start of the "ps" feature payload.
+#define PS1_INS_FORMAT_VERSION 1
+
+// PS1 SPU envelope and per-voice flags. the envelope maps 1:1 onto the ADSR1/ADSR2 voice
+// registers (psx-spx, "SPU Volume and ADSR Generator").
+struct DivInstrumentPS1 {
+  unsigned char ar; // attack rate 0-127 (shift<<2|step, 0=fastest)
+  bool arExp; // exponential attack
+  unsigned char dr; // decay shift 0-15
+  unsigned char sl; // sustain level 0-15 (level=(sl+1)*0x800)
+  unsigned char sr; // sustain rate 0-127 (shift<<2|step)
+  bool srDec; // sustain direction (false=increase, true=decrease)
+  bool srExp; // exponential sustain
+  unsigned char rr; // release shift 0-31
+  bool rrExp; // exponential release
+  bool reverb, noise, pitchMod;
+
+  unsigned short getADSR1() const {
+    return (arExp?0x8000:0)|((ar&127)<<8)|((dr&15)<<4)|(sl&15);
+  }
+  unsigned short getADSR2() const {
+    return (srExp?0x8000:0)|(srDec?0x4000:0)|((sr&127)<<6)|(rrExp?0x20:0)|(rr&31);
+  }
+  void setADSR1(unsigned short v) {
+    arExp=v&0x8000;
+    ar=(v>>8)&127;
+    dr=(v>>4)&15;
+    sl=v&15;
+  }
+  void setADSR2(unsigned short v) {
+    srExp=v&0x8000;
+    srDec=v&0x4000;
+    sr=(v>>6)&127;
+    rrExp=v&0x20;
+    rr=v&31;
+  }
+
+  bool operator==(const DivInstrumentPS1& other);
+  bool operator!=(const DivInstrumentPS1& other) {
+    return !(*this==other);
+  }
+  // defaults: ADSR1=0x000f, ADSR2=0x0008 (fastest linear attack to max, hold, linear release)
+  DivInstrumentPS1():
+    ar(0),
+    arExp(false),
+    dr(0),
+    sl(15),
+    sr(0),
+    srDec(false),
+    srExp(false),
+    rr(8),
+    rrExp(false),
+    reverb(false),
+    noise(false),
+    pitchMod(false) {}
+};
+
 struct DivInstrumentPOD {
   DivInstrumentType type;
   DivInstrumentFM fm;
@@ -1087,6 +1158,7 @@ struct DivInstrumentPOD {
   DivInstrumentSID2 sid2;
   DivInstrumentSID3 sid3;
   DivInstrumentKlattsch klattsch;
+  DivInstrumentPS1 ps1;
 
   DivInstrumentPOD() :
     type(DIV_INS_FM) {
@@ -1203,6 +1275,7 @@ struct DivInstrument: DivInstrumentPOD {
   void writeFeatureS2(SafeWriter* w);
   void writeFeatureS3(SafeWriter* w);
   void writeFeatureKT(SafeWriter* w);
+  void writeFeaturePS(SafeWriter* w);
 
   void readFeatureNA(SafeReader& reader, short version);
   void readFeatureFM(SafeReader& reader, short version);
@@ -1230,6 +1303,7 @@ struct DivInstrument: DivInstrumentPOD {
   void readFeatureS2(SafeReader& reader, short version);
   void readFeatureS3(SafeReader& reader, short version);
   void readFeatureKT(SafeReader& reader, short version);
+  void readFeaturePS(SafeReader& reader, short version);
 
   DivDataErrors readInsDataOld(SafeReader& reader, short version);
   DivDataErrors readInsDataNew(SafeReader& reader, short version, bool fui, DivSong* song);
