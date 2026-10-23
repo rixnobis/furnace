@@ -1,0 +1,5 @@
+pcsx-redux 7f37315bdebe50b6144bd3c27ec284eb000b1db2
+spu/ = src/spu: adpcm adsr externals gauss interface interpolation noise registers reverb spu types volume
+supportpsx/ = src/supportpsx: adpcm
+Copied verbatim at that commit. Left out: cfg dma debug freeze sdlaudio settings xa playbacklua.
+These files are C++20 (<span>, <bit>); Furnace is C++14, so they build per-source as C++20.
