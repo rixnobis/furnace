@@ -3043,28 +3043,101 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       break;
     }
     case DIV_SYSTEM_PS1: {
-      int reverbPreset=flags.getInt("reverbPreset",0);
+      // reverb: the preset combo loads the 32 registers and the work area base from the
+      // psx-spx table; every register and the base can then be edited, which makes the
+      // preset "Custom" (DivPlatformPS1::REVERB_CUSTOM). The loading rule (absent register
+      // flags = the preset's values) is DivPlatformPS1::reverbResolve.
+      DivPlatformPS1::ReverbSetup rs;
+      DivPlatformPS1::reverbResolve(flags,rs);
+      int reverbPreset=rs.preset;
       int reverbVolL=flags.getInt("reverbVolL",48);
       int reverbVolR=flags.getInt("reverbVolR",48);
-      if (reverbPreset<0 || reverbPreset>=DivPlatformPS1::REVERB_PRESETS) reverbPreset=0;
+      unsigned short rvbRegs[32];
+      memcpy(rvbRegs,rs.regs,sizeof(rvbRegs));
+      unsigned short rvbBase=flags.has("rvb_mBASE")?(unsigned short)(flags.getInt("rvb_mBASE",0)&0xffff):(unsigned short)(rs.base>>3);
+      bool presetSel=false, regsAltered=false, addrAltered=false, baseAltered=false;
 
       ImGui::Text(_("Reverb:"));
       char presetLabel[64];
-      snprintf(presetLabel,63,"%s (%u bytes)",DivPlatformPS1::reverbPresetName(reverbPreset),DivPlatformPS1::reverbSize(reverbPreset));
+      if (reverbPreset==DivPlatformPS1::REVERB_CUSTOM) {
+        snprintf(presetLabel,63,"%s",DivPlatformPS1::reverbPresetName(reverbPreset));
+      } else {
+        snprintf(presetLabel,63,"%s (%u bytes)",DivPlatformPS1::reverbPresetName(reverbPreset),DivPlatformPS1::reverbSize(reverbPreset));
+      }
       if (ImGui::BeginCombo(_("Preset##PS1Reverb"),presetLabel)) {
         for (int i=0; i<DivPlatformPS1::REVERB_PRESETS; i++) {
           snprintf(presetLabel,63,"%s (%u bytes)",DivPlatformPS1::reverbPresetName(i),DivPlatformPS1::reverbSize(i));
           if (ImGui::Selectable(presetLabel,i==reverbPreset)) {
             reverbPreset=i;
-            altered=true;
-            // the work area size changes, and samples must stay below it.
-            mustRender=true;
+            for (int j=0; j<32; j++) rvbRegs[j]=DivPlatformPS1::reverbPresetReg(i,j);
+            rvbBase=(unsigned short)((PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbSize(i))>>3);
+            presetSel=true;
           }
         }
         ImGui::EndCombo();
       }
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(_("the reverb work area takes this much SPU RAM at the top, leaving less for samples.\nreverb applies to instruments with the reverb flag on."));
+        ImGui::SetTooltip(_("loads all reverb registers and the work area base below.\nthe reverb work area takes SPU RAM at the top, leaving less for samples.\nreverb applies to instruments with the reverb flag on."));
+      }
+
+      // hex fields, two per row, in psx-spx's L/R pairs.
+      auto regTable=[&](const char* id, std::initializer_list<int> regs) {
+        if (ImGui::BeginTable(id,4,ImGuiTableFlags_SizingStretchSame)) {
+          for (int i: regs) {
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(DivPlatformPS1::reverbRegName(i));
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::PushID(i);
+            if (ImGui::InputScalar("##RvbReg",ImGuiDataType_U16,&rvbRegs[i],NULL,NULL,"%.4X",ImGuiInputTextFlags_CharsHexadecimal)) {
+              regsAltered=true;
+              if (DivPlatformPS1::reverbRegIsAddr(i)) addrAltered=true;
+            }
+            ImGui::PopID();
+          }
+          ImGui::EndTable();
+        }
+      };
+      ImGui::Text(_("Volumes:"));
+      regTable("PS1RvbVol",{2,3,4,5,6,7,8,9,30,31});
+      ImGui::Text(_("Delays/addresses (8-byte units):"));
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(_("editing an address re-derives the work area base from the size the addresses need."));
+      }
+      regTable("PS1RvbAddr",{0,1,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29});
+
+      ImGui::Text(_("Work area:"));
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted("mBASE");
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(ImGui::CalcTextSize("FFFFFF").x+ImGui::GetStyle().FramePadding.x*2.0f);
+      if (ImGui::InputScalar("##PS1RvbBase",ImGuiDataType_U16,&rvbBase,NULL,NULL,"%.4X",ImGuiInputTextFlags_CharsHexadecimal)) {
+        baseAltered=true;
+      }
+      ImGui::SameLine();
+      if (reverbPreset==0) {
+        ImGui::Text(_("(reverb off)"));
+      } else {
+        ImGui::Text(_("= %.5X: area %u bytes, registers need %u bytes"),rs.base,PS1SPUBridge::RAM_SIZE-rs.base,rs.required);
+        int dropped=0;
+        if (chan>=0 && e->getDispatch(chan)!=NULL) {
+          dropped=((DivPlatformPS1*)e->getDispatch(chan))->reverbSamplesDropped();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text,uiColors[GUI_COLOR_LOGLEVEL_WARNING]);
+        if (rs.warn&DivPlatformPS1::REVERB_WARN_CLAMPED) {
+          ImGui::TextWrapped(_("warning: mBASE + %u bytes runs past the end of SPU RAM; mBASE lowered to %.4X."),rs.required,rs.base>>3);
+        }
+        if (rs.warn&DivPlatformPS1::REVERB_WARN_LOW) {
+          ImGui::TextWrapped(_("warning: mBASE is inside the capture buffers; raised to %.4X."),rs.base>>3);
+        }
+        if (rs.warn&DivPlatformPS1::REVERB_WARN_ALIAS) {
+          ImGui::TextWrapped(_("warning: the addresses need more than the SPU RAM above the capture buffers; reverb reads will wrap onto each other."));
+        }
+        if (dropped>0) {
+          ImGui::TextWrapped(_("warning: the work area overlaps the samples: %d sample(s) did not fit below it."),dropped);
+        }
+        ImGui::PopStyleColor();
       }
 
       ImGui::Text(_("Reverb volume:"));
@@ -3079,9 +3152,31 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
         altered=true;
       } rightClickable
 
-      if (altered) {
+      if (regsAltered || baseAltered) {
+        // coming from Off there is no work area yet: derive it as for an address edit.
+        const bool wasOff=(reverbPreset==0 && !presetSel);
+        reverbPreset=DivPlatformPS1::REVERB_CUSTOM;
+        if ((addrAltered || wasOff) && !baseAltered) {
+          // the size is derived: put the area at the top of SPU RAM.
+          unsigned int need=DivPlatformPS1::reverbRequired(rvbRegs);
+          if (need>PS1SPUBridge::RAM_SIZE) need=PS1SPUBridge::RAM_SIZE;
+          rvbBase=(unsigned short)((PS1SPUBridge::RAM_SIZE-need)>>3);
+        }
+      }
+      if (presetSel || regsAltered || baseAltered) {
+        altered=true;
+        // the work area may move, and samples must stay below it.
+        mustRender=true;
         e->lockSave([&]() {
           flags.set("reverbPreset",reverbPreset);
+          for (int i=0; i<32; i++) {
+            flags.set(String("rvb_")+DivPlatformPS1::reverbRegName(i),(int)rvbRegs[i]);
+          }
+          flags.set("rvb_mBASE",(int)rvbBase);
+        });
+      }
+      if (altered) {
+        e->lockSave([&]() {
           flags.set("reverbVolL",reverbVolL);
           flags.set("reverbVolR",reverbVolR);
         });

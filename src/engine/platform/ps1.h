@@ -61,10 +61,16 @@ class DivPlatformPS1: public DivDispatch {
   unsigned short regPool[256];
   // per-voice enable bits (bit n = voice n), as last written to PMON/NON/EON.
   unsigned int pmonMask, nonMask, eonMask;
-  // system flags: reverb preset (index into the psx-spx preset table, 0 = off) and the
-  // reverb output volume (vLOUT/vROUT = vol<<8, -128..127).
+  // system flags: reverb preset (index into the psx-spx preset table, 0 = off,
+  // REVERB_CUSTOM = registers edited), the reverb output volume (vLOUT/vROUT = vol<<8,
+  // -128..127), and the resolved register set (see reverbResolve).
   int reverbPreset;
   int reverbVolL, reverbVolR;
+  unsigned short rvbRegs[32];
+  unsigned int rvbBase, rvbRequired;
+  int rvbWarn;
+  // samples that did not fit below the work area in the last renderSamples.
+  int rvbSamplesDropped;
   // SPUCNT bits 13-8: noise clock (shift<<2 | step).
   unsigned char noiseFreq;
 
@@ -108,10 +114,37 @@ class DivPlatformPS1: public DivDispatch {
     int init(DivEngine* parent, int channels, int sugRate, const DivConfig& flags);
     void quit();
     static const int REVERB_PRESETS=10;
-    // preset name, in flag order ("reverbPreset" 0..REVERB_PRESETS-1)
+    // "reverbPreset" value once any reverb register has been edited (reverb on).
+    static const int REVERB_CUSTOM=10;
+    // reverbResolve warnings
+    enum {
+      REVERB_WARN_CLAMPED=1, // base + required size ran past the end of SPU RAM: base lowered
+      REVERB_WARN_LOW=2,     // base was inside the capture buffers: raised to the sample area
+      REVERB_WARN_ALIAS=4    // the required size does not fit above the capture buffers at all
+    };
+    struct ReverbSetup {
+      int preset;
+      unsigned short regs[32];
+      // work area start in bytes (multiple of 8), bytes the registers address (derived),
+      // REVERB_WARN_* bits. Off: base=RAM_SIZE, required=0.
+      unsigned int base, required;
+      int warn;
+    };
+    // preset name, in flag order ("reverbPreset" 0..REVERB_PRESETS-1, REVERB_CUSTOM)
     static const char* reverbPresetName(int preset);
-    // work area size in bytes of a preset (0 for off)
+    // work area size in bytes of a preset as listed by psx-spx (0 for off)
     static unsigned int reverbSize(int preset);
+    // psx-spx register name (index 0..31 = 1F801DC0h..1F801DFEh); flag key is "rvb_"+name
+    static const char* reverbRegName(int reg);
+    static unsigned short reverbPresetReg(int preset, int reg);
+    // whether register reg is an address (dAPF/m*/d*, 8-byte units) rather than a volume
+    static bool reverbRegIsAddr(int reg);
+    // bytes of work area the address registers reach (see ps1.cpp)
+    static unsigned int reverbRequired(const unsigned short* regs);
+    // flags -> register set, base and warnings (the loading rule, see ps1.cpp)
+    static void reverbResolve(const DivConfig& flags, ReverbSetup& s);
+    int reverbWarnings() { return rvbWarn; }
+    int reverbSamplesDropped() { return rvbSamplesDropped; }
     DivPlatformPS1();
     ~DivPlatformPS1();
 };
