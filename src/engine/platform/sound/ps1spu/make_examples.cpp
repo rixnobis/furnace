@@ -1,7 +1,8 @@
 // Ours. Builds the PS1 example songs (papers/ps1-examples/) from the intermediate written by
 // papers/ps1-examples/tools/score2ps1.py, through DivEngine's own API (same approach as
-// make_corpus.cpp): one DIV_SYSTEM_PS1 chip, speed 1 (one row per score tick), samples as
-// 16-bit PCM, PS1 instruments with the bank's ADSR words.
+// make_corpus.cpp): one DIV_SYSTEM_PS1 chip, one engine tick per score tick, speed = score
+// ticks per row (key-offs between rows as FCxx delayed note release), samples as 16-bit PCM,
+// PS1 instruments with the bank's ADSR words.
 // usage: ps1_examples <intermediate dir> <out.fur>
 //   <dir>/song.txt: song/sample/ins/cell lines (format in score2ps1.py), <dir>/sNN.raw: PCM
 // regenerating both examples (from papers/ps1-examples/):
@@ -64,37 +65,51 @@ int main(int argc, char** argv) {
   }
   e.createNew("id0=225\n","Sony PlayStation",false);
   DivSubSong* sub=e.song.subsong[0];
-  int patLen=0, rows=0, cells=0;
+  int patLen=0, rows=0, cells=0, speed=1, lastSpeed=1, perBeat=4;
   char line[1024];
   while (fgets(line,sizeof(line),in)) {
     char kind[16];
     if (sscanf(line,"%15s",kind)!=1) continue;
     if (strcmp(kind,"song")==0) {
       double hz;
-      if (sscanf(line,"song %lf %d %d",&hz,&patLen,&rows)!=3 || patLen<1 || patLen>DIV_MAX_ROWS) {
+      if (sscanf(line,"song %lf %d %d %d %d %d",&hz,&patLen,&rows,&speed,&lastSpeed,&perBeat)!=6 || patLen<1 || patLen>DIV_MAX_ROWS ||
+          speed<1 || speed>255 || lastSpeed<1 || lastSpeed>speed || perBeat<1 || perBeat>255) {
         fprintf(stderr,"bad song line\n"); return 1;
       }
       int pats=(rows+patLen-1)/patLen;
       if (pats>DIV_MAX_PATTERNS) {
         fprintf(stderr,"%d patterns do not fit\n",pats); return 1;
       }
-      e.song.name=restOf(line,4);
+      e.song.name=restOf(line,7);
       e.song.author="rixnobis";
       e.song.systemName="Sony PlayStation";
       sub->hz=(float)hz;
-      sub->speeds.val[0]=1;
+      sub->speeds.val[0]=speed;
       sub->speeds.len=1;
+      // highlights at the beat and the bar: the tracker shows 60*hz/(hilightA*speed) = the score's BPM.
+      sub->hilightA=perBeat;
+      sub->hilightB=perBeat*4;
       sub->patLen=patLen;
       sub->ordersLen=pats;
       for (int ch=0; ch<e.getTotalChannelCount(); ch++) {
         sub->pat[ch].effectCols=3;
         for (int o=0; o<pats; o++) sub->orders.ord[ch][o]=o;
       }
-      // the last row jumps back to the start: the song loops where the PS1 player loops.
-      int last=rows-1;
-      DivPattern* p=sub->pat[0].getPattern(last/patLen,true);
-      p->newData[last%patLen][DIV_PAT_FX(2)]=0x0d;
-      p->newData[last%patLen][DIV_PAT_FXVAL(2)]=0x00;
+      // the last row jumps back to the start: the song loops where the PS1 player loops. when
+      // the loop point is not on the grid the last row is shorter (0Fxx), and row 0 restores the
+      // speed. these go on the last voice, which the songs never use (the converter allocates
+      // voices from 0 up).
+      int last=rows-1, fxCh=e.getTotalChannelCount()-1;
+      DivPattern* p=sub->pat[fxCh].getPattern(last/patLen,true);
+      p->newData[last%patLen][DIV_PAT_FX(0)]=0x0d;
+      p->newData[last%patLen][DIV_PAT_FXVAL(0)]=0x00;
+      if (lastSpeed!=speed) {
+        p->newData[last%patLen][DIV_PAT_FX(1)]=0x0f;
+        p->newData[last%patLen][DIV_PAT_FXVAL(1)]=lastSpeed;
+        p=sub->pat[fxCh].getPattern(0,true);
+        p->newData[0][DIV_PAT_FX(1)]=0x0f;
+        p->newData[0][DIV_PAT_FXVAL(1)]=speed;
+      }
     } else if (strcmp(kind,"sample")==0) {
       int id, rate, ls, le;
       if (sscanf(line,"sample %d %d %d %d",&id,&rate,&ls,&le)!=4 || id!=e.song.sampleLen) {
@@ -130,15 +145,23 @@ int main(int argc, char** argv) {
       ins->ps1.reverb=rev;
       e.addInstrumentPtr(ins);
     } else if (strcmp(kind,"cell")==0) {
-      int ch, row, ins, vol, pl, pr;
+      int ch, row, ins, vol, pl, pr, delay;
       char note[8];
-      if (sscanf(line,"cell %d %d %7s %d %d %d %d",&ch,&row,note,&ins,&vol,&pl,&pr)!=7 || row>=rows || ch>=e.getTotalChannelCount()) {
+      if (sscanf(line,"cell %d %d %7s %d %d %d %d %d",&ch,&row,note,&ins,&vol,&pl,&pr,&delay)!=8 || row>=rows || ch>=e.getTotalChannelCount()-1 ||
+          delay<0 || delay>=speed) {
         fprintf(stderr,"bad cell line: %s",line); return 1;
       }
       DivPattern* p=sub->pat[ch].getPattern(row/patLen,true);
       short* c=p->newData[row%patLen];
       if (strcmp(note,"off")==0) {
-        c[DIV_PAT_NOTE]=DIV_NOTE_OFF;
+        if (delay>0) {
+          // key-off inside the row: FCxx releases the note (SPU key-off, ADSR release) xx ticks in.
+          c[DIV_PAT_FX(2)]=0xfc; c[DIV_PAT_FXVAL(2)]=delay;
+        } else {
+          c[DIV_PAT_NOTE]=DIV_NOTE_OFF;
+        }
+      } else if (delay!=0) {
+        fprintf(stderr,"note-on off the grid: %s",line); return 1;
       } else {
         // MIDI note 60 is C-4; the pattern note value 60 is C-0.
         c[DIV_PAT_NOTE]=atoi(note)+48;
