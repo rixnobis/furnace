@@ -34,6 +34,10 @@
 // point when it is not on a row 0), so the order table is 0..N-1 and the loop target is the
 // pattern where the song loops. each pattern starts with a snapshot of the register state
 // (voices touched so far and the global state), so it can be entered cold (SPD_Seek).
+// the loop: the platform skips writes its register cache already holds, so the song entered
+// from its own end can write differently than from a cold start. the export plays the loop
+// twice and appends the loop-back patterns whose effect differs, looping into the first pass's
+// copies once the two agree in effect and register state.
 
 #include "spudump.h"
 #include "../engine.h"
@@ -155,6 +159,46 @@ static void emitBatch(std::vector<unsigned int>& out, std::vector<unsigned int>&
   }
 }
 
+// the replay's register state, as far as a write can be redundant: a write to a snapshot
+// register holding that value already changes nothing. KON/KOFF and the rest always count.
+struct SPDRegState {
+  unsigned short v[256];
+  bool set[256];
+  SPDRegState() {
+    memset(v,0,sizeof(v));
+    memset(set,0,sizeof(set));
+  }
+  bool operator==(const SPDRegState& o) const {
+    for (int i=0; i<256; i++) {
+      if (set[i]!=o.set[i] || (set[i] && v[i]!=o.v[i])) return false;
+    }
+    return true;
+  }
+};
+
+// play a pattern from state st: the writes that take effect, tick by tick (the snapshot opens
+// tick 0, as it is emitted), with the tick rate
+static std::vector<std::vector<unsigned int>> spdEffective(const SPDPattern& p, SPDRegState& st) {
+  std::vector<std::vector<unsigned int>> eff;
+  auto apply=[&](std::vector<unsigned int>& out, unsigned int w) {
+    unsigned int r=w>>16, val=w&0xffff;
+    if (snapshotReg(r)) {
+      if (st.set[r>>1] && st.v[r>>1]==val) return;
+      st.v[r>>1]=val;
+      st.set[r>>1]=true;
+    }
+    out.push_back(w);
+  };
+  for (size_t ti=0; ti<p.ticks.size(); ti++) {
+    std::vector<unsigned int> out;
+    out.push_back(p.ticks[ti].rate);
+    if (ti==0) for (unsigned int w: p.snapshot) apply(out,w);
+    for (unsigned int w: p.ticks[ti].words) apply(out,w);
+    eff.push_back(out);
+  }
+  return eff;
+}
+
 void DivExportSPUDump::run() {
   bool loop=conf.getBool("loop",true);
   bool clearReverb=conf.getBool("clearReverb",true);
@@ -175,6 +219,11 @@ void DivExportSPUDump::run() {
   DivPlatformPS1* ps1=(DivPlatformPS1*)e->getDispatch(sys);
 
   std::vector<SPDPattern> pats;
+  // the loop-back pass, captured as the engine plays it: the platform skips writes whose value
+  // its register cache already holds, so a pattern can write differently when entered from the
+  // end of the song than from a cold start
+  std::vector<SPDPattern> pats2;
+  std::vector<SPDPattern>* cur=&pats;
   int loopPat=0;
   unsigned int initRate=0;
   unsigned short shadow[256];
@@ -210,10 +259,10 @@ void DivExportSPUDump::run() {
     while (!mustAbort) {
       // a new pattern starts with the tick that plays a new row of another order, or at the
       // loop point (the tick right after it if virtual tempo skips the exact row).
-      bool newPat=pats.empty();
+      bool newPat=cur->empty();
       bool atLoop=false;
-      if (e->ticks<=1 && !pats.empty() && e->curOrder!=pats.back().order) newPat=true;
-      if (!loopPlaced) {
+      if (e->ticks<=1 && !cur->empty() && e->curOrder!=cur->back().order) newPat=true;
+      if (!loopPlaced && cur==&pats) {
         if (loopOrder==e->curOrder && loopRow==e->curRow) loopNow=true;
         if (loopNow && (e->ticks<=1 || !(loopOrder==e->curOrder && loopRow==e->curRow))) {
           newPat=true;
@@ -223,7 +272,7 @@ void DivExportSPUDump::run() {
         }
       }
       if (newPat) {
-        if (pats.empty() || !pats.back().ticks.empty()) {
+        if (cur->empty() || !cur->back().ticks.empty()) {
           SPDPattern p;
           p.order=e->curOrder;
           // reverb unit (mBASE, then its registers), volumes and enables, SPUCNT, voices
@@ -239,20 +288,28 @@ void DivExportSPUDump::run() {
           for (unsigned int r=0; r<0x180; r+=2) {
             if (snapshotReg(r) && shadowSet[r>>1]) p.snapshot.push_back((r<<16)|shadow[r>>1]);
           }
-          pats.push_back(p);
+          cur->push_back(p);
           progress[0].amount=MIN(1.0f,(float)e->curOrder/(float)ordersLen);
         } else {
-          pats.back().order=e->curOrder;
+          cur->back().order=e->curOrder;
         }
       }
       if (atLoop) loopPat=(int)pats.size()-1;
 
-      bool done=(e->nextTick() || !e->playing);
+      bool wrapped=e->nextTick();
+      bool done=(wrapped || !e->playing);
       std::vector<DivRegWrite>& writes=disp->getRegisterWrites();
-      if (done) {
+      if (done && !(loop && wrapped && e->playing && cur==&pats)) {
         // the tick that wrapped around is the loop target's first tick: not recorded.
         writes.clear();
         break;
+      }
+      if (done) {
+        // end of the first pass: the wrapped tick opens the loop-back pass
+        cur=&pats2;
+        SPDPattern p;
+        p.order=e->curOrder;
+        cur->push_back(p);
       }
       SPDTick t;
       t.rate=(unsigned int)round(e->divider*65536.0);
@@ -269,8 +326,8 @@ void DivExportSPUDump::run() {
         if (addr==SPD_KON_HI || addr==SPD_KOFF_HI) voicesUsed|=(val&0xff)<<16;
       }
       writes.clear();
-      pats.back().ticks.push_back(t);
-      totalTicks++;
+      cur->back().ticks.push_back(t);
+      if (cur==&pats) totalTicks++;
     }
 
     disp->toggleRegisterDump(false);
@@ -295,6 +352,38 @@ void DivExportSPUDump::run() {
     return;
   }
   if (loopPat>=(int)pats.size()) loopPat=0;
+  // loop-back pass: where it takes a different effect from the first pass, append its differing
+  // head (loop target up to where the passes agree to the end) and loop to the first pass's
+  // copy of the rest: [P0..Pn, PT'..Pj-1'], loop target j
+  while (!pats2.empty() && pats2.back().ticks.empty()) pats2.pop_back();
+  if (loop && !pats2.empty()) {
+    size_t n2=pats.size()-(size_t)loopPat;
+    if (pats2.size()!=n2) {
+      logAppendf("WARNING: loop-back pass has %d patterns, first pass %d from the loop; looping to the first pass's",(int)pats2.size(),(int)n2);
+    } else {
+      // first-pass pattern k can stand in for loop-back pattern k when, played from the state
+      // the loop-back pass enters k with, it takes the same effect and leaves the same state
+      SPDRegState st;
+      for (SPDPattern& p: pats) spdEffective(p,st);
+      SPDRegState end1=st;
+      size_t j=0;
+      for (size_t k=0; k<n2; k++) {
+        SPDRegState alt=st;
+        std::vector<std::vector<unsigned int>> e2=spdEffective(pats2[k],st);
+        std::vector<std::vector<unsigned int>> e1=spdEffective(pats[loopPat+k],alt);
+        if (!(e1==e2 && alt==st)) j=k+1;
+      }
+      if (!(st==end1)) {
+        logAppend("WARNING: register state at the end of the loop-back pass differs from the first pass's; later passes are not checked");
+      }
+      if (j>0) {
+        logAppendf("loop-back pass takes a different effect in its first %d of %d patterns; appended",(int)j,(int)n2);
+        int oldLoop=loopPat;
+        for (size_t i=0; i<j; i++) pats.push_back(pats2[i]);
+        loopPat=(j<n2)?(oldLoop+(int)j):(int)(pats.size()-j);
+      }
+    }
+  }
   if (pats.size()>SPD_MAX_PATTERNS) {
     logAppendf("WARNING: %d patterns; spdplayer plays at most %d",(int)pats.size(),SPD_MAX_PATTERNS);
   }
