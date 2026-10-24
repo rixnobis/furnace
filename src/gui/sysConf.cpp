@@ -19,6 +19,7 @@
 
 #include "../engine/dispatch.h"
 #include "../engine/platform/gbaminmod.h"
+#include "../engine/platform/ps1.h"
 #include "gui.h"
 #include "misc/cpp/imgui_stdlib.h"
 #include <imgui.h>
@@ -3037,6 +3038,52 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       if (altered) {
         e->lockSave([&]() {
           flags.set("quarterClock",(int)quarterClock);
+        });
+      }
+      break;
+    }
+    case DIV_SYSTEM_PS1: {
+      int reverbPreset=flags.getInt("reverbPreset",0);
+      int reverbVolL=flags.getInt("reverbVolL",48);
+      int reverbVolR=flags.getInt("reverbVolR",48);
+      if (reverbPreset<0 || reverbPreset>=DivPlatformPS1::REVERB_PRESETS) reverbPreset=0;
+
+      ImGui::Text(_("Reverb:"));
+      char presetLabel[64];
+      snprintf(presetLabel,63,"%s (%u bytes)",DivPlatformPS1::reverbPresetName(reverbPreset),DivPlatformPS1::reverbSize(reverbPreset));
+      if (ImGui::BeginCombo(_("Preset##PS1Reverb"),presetLabel)) {
+        for (int i=0; i<DivPlatformPS1::REVERB_PRESETS; i++) {
+          snprintf(presetLabel,63,"%s (%u bytes)",DivPlatformPS1::reverbPresetName(i),DivPlatformPS1::reverbSize(i));
+          if (ImGui::Selectable(presetLabel,i==reverbPreset)) {
+            reverbPreset=i;
+            altered=true;
+            // the work area size changes, and samples must stay below it.
+            mustRender=true;
+          }
+        }
+        ImGui::EndCombo();
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(_("the reverb work area takes this much SPU RAM at the top, leaving less for samples.\nreverb applies to instruments with the reverb flag on."));
+      }
+
+      ImGui::Text(_("Reverb volume:"));
+      if (CWSliderInt(_("Left##PS1ReverbVolL"),&reverbVolL,-128,127)) {
+        if (reverbVolL<-128) reverbVolL=-128;
+        if (reverbVolL>127) reverbVolL=127;
+        altered=true;
+      } rightClickable
+      if (CWSliderInt(_("Right##PS1ReverbVolR"),&reverbVolR,-128,127)) {
+        if (reverbVolR<-128) reverbVolR=-128;
+        if (reverbVolR>127) reverbVolR=127;
+        altered=true;
+      } rightClickable
+
+      if (altered) {
+        e->lockSave([&]() {
+          flags.set("reverbPreset",reverbPreset);
+          flags.set("reverbVolL",reverbVolL);
+          flags.set("reverbVolR",reverbVolR);
         });
       }
       break;

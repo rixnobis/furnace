@@ -48,6 +48,122 @@
 #define PS1_EON_LO 0xd98
 // fixed (direct) volume mode: bit 15 must stay clear (it selects sweep mode).
 #define PS1_VOL_MAX 0x3fff
+// reverb: output volume, work area start (mBASE, in 8-byte units), preset block 0xdc0-0xdfe
+#define PS1_EVOL_L 0xd84
+#define PS1_EVOL_R 0xd86
+#define PS1_MBASE 0xda2
+#define PS1_SPUCNT 0xdaa
+#define PS1_REVERB_REGS 0xdc0
+// SPUCNT: SPU enable, unmute, reverb master enable (bit 7), noise clock in bits 13-8
+#define PS1_SPUCNT_ON 0xc000
+#define PS1_SPUCNT_REVERB 0x0080
+#define PS1_NOISE_DEFAULT 0x20
+
+// the standard reverb presets from psx-spx ("SPU Reverb Examples"): work area size in bytes,
+// then 1F801DC0h..1F801DFEh (dAPF1 ... vRIN).
+struct PS1ReverbPreset {
+  const char* name;
+  unsigned int size;
+  unsigned short regs[32];
+};
+
+static const PS1ReverbPreset ps1ReverbPresets[DivPlatformPS1::REVERB_PRESETS]={
+  {"Off", 0, {
+    0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+    0x0000,0x0000,0x0001,0x0001,0x0001,0x0001,0x0001,0x0001,
+    0x0000,0x0000,0x0001,0x0001,0x0001,0x0001,0x0001,0x0001,
+    0x0000,0x0000,0x0001,0x0001,0x0001,0x0001,0x0000,0x0000}},
+  {"Room", 0x26c0, {
+    0x007d,0x005b,0x6d80,0x54b8,0xbed0,0x0000,0x0000,0xba80,
+    0x5800,0x5300,0x04d6,0x0333,0x03f0,0x0227,0x0374,0x01ef,
+    0x0334,0x01b5,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+    0x0000,0x0000,0x01b4,0x0136,0x00b8,0x005c,0x8000,0x8000}},
+  {"Studio Small", 0x1f40, {
+    0x0033,0x0025,0x70f0,0x4fa8,0xbce0,0x4410,0xc0f0,0x9c00,
+    0x5280,0x4ec0,0x03e4,0x031b,0x03a4,0x02af,0x0372,0x0266,
+    0x031c,0x025d,0x025c,0x018e,0x022f,0x0135,0x01d2,0x00b7,
+    0x018f,0x00b5,0x00b4,0x0080,0x004c,0x0026,0x8000,0x8000}},
+  {"Studio Medium", 0x4840, {
+    0x00b1,0x007f,0x70f0,0x4fa8,0xbce0,0x4510,0xbef0,0xb4c0,
+    0x5280,0x4ec0,0x0904,0x076b,0x0824,0x065f,0x07a2,0x0616,
+    0x076c,0x05ed,0x05ec,0x042e,0x050f,0x0305,0x0462,0x02b7,
+    0x042f,0x0265,0x0264,0x01b2,0x0100,0x0080,0x8000,0x8000}},
+  {"Studio Large", 0x6fe0, {
+    0x00e3,0x00a9,0x6f60,0x4fa8,0xbce0,0x4510,0xbef0,0xa680,
+    0x5680,0x52c0,0x0dfb,0x0b58,0x0d09,0x0a3c,0x0bd9,0x0973,
+    0x0b59,0x08da,0x08d9,0x05e9,0x07ec,0x04b0,0x06ef,0x03d2,
+    0x05ea,0x031d,0x031c,0x0238,0x0154,0x00aa,0x8000,0x8000}},
+  {"Hall", 0xade0, {
+    0x01a5,0x0139,0x6000,0x5000,0x4c00,0xb800,0xbc00,0xc000,
+    0x6000,0x5c00,0x15ba,0x11bb,0x14c2,0x10bd,0x11bc,0x0dc1,
+    0x11c0,0x0dc3,0x0dc0,0x09c1,0x0bc4,0x07c1,0x0a00,0x06cd,
+    0x09c2,0x05c1,0x05c0,0x041a,0x0274,0x013a,0x8000,0x8000}},
+  {"Half Echo", 0x3c00, {
+    0x0017,0x0013,0x70f0,0x4fa8,0xbce0,0x4510,0xbef0,0x8500,
+    0x5f80,0x54c0,0x0371,0x02af,0x02e5,0x01df,0x02b0,0x01d7,
+    0x0358,0x026a,0x01d6,0x011e,0x012d,0x00b1,0x011f,0x0059,
+    0x01a0,0x00e3,0x0058,0x0040,0x0028,0x0014,0x8000,0x8000}},
+  {"Space Echo", 0xf6c0, {
+    0x033d,0x0231,0x7e00,0x5000,0xb400,0xb000,0x4c00,0xb000,
+    0x6000,0x5400,0x1ed6,0x1a31,0x1d14,0x183b,0x1bc2,0x16b2,
+    0x1a32,0x15ef,0x15ee,0x1055,0x1334,0x0f2d,0x11f6,0x0c5d,
+    0x1056,0x0ae1,0x0ae0,0x07a2,0x0464,0x0232,0x8000,0x8000}},
+  {"Chaos Echo", 0x18040, {
+    0x0001,0x0001,0x7fff,0x7fff,0x0000,0x0000,0x0000,0x8100,
+    0x0000,0x0000,0x1fff,0x0fff,0x1005,0x0005,0x0000,0x0000,
+    0x1005,0x0005,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+    0x0000,0x0000,0x1004,0x1002,0x0004,0x0002,0x8000,0x8000}},
+  {"Delay", 0x18040, {
+    0x0001,0x0001,0x7fff,0x7fff,0x0000,0x0000,0x0000,0x0000,
+    0x0000,0x0000,0x1fff,0x0fff,0x1005,0x0005,0x0000,0x0000,
+    0x1005,0x0005,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,
+    0x0000,0x0000,0x1004,0x1002,0x0004,0x0002,0x8000,0x8000}},
+};
+
+// largest work area (Chaos Echo/Delay), zero-filled before reverb starts.
+#define PS1_REVERB_MAX_SIZE 0x18040
+static const unsigned char ps1ReverbZero[PS1_REVERB_MAX_SIZE]={};
+
+const char* DivPlatformPS1::reverbPresetName(int preset) {
+  if (preset<0 || preset>=REVERB_PRESETS) return "?";
+  return ps1ReverbPresets[preset].name;
+}
+
+unsigned int DivPlatformPS1::reverbSize(int preset) {
+  if (preset<0 || preset>=REVERB_PRESETS) return 0;
+  return ps1ReverbPresets[preset].size;
+}
+
+// the work area sits at the top of SPU RAM; samples must stay below this.
+unsigned int DivPlatformPS1::reverbBase() {
+  return PS1SPUBridge::RAM_SIZE-reverbSize(reverbPreset);
+}
+
+void DivPlatformPS1::writeCtrl() {
+  spuWrite(PS1_SPUCNT,PS1_SPUCNT_ON|((noiseFreq&0x3f)<<8)|(reverbPreset>0?PS1_SPUCNT_REVERB:0));
+}
+
+// program the reverb unit for the current preset: master enable and output off, zero the
+// work area, mBASE, the 32 preset registers, output volume, then master enable on.
+// "Off" leaves mBASE at 0 (the core's reverb-off state) and the volumes at 0.
+void DivPlatformPS1::writeReverb() {
+  const PS1ReverbPreset& p=ps1ReverbPresets[reverbPreset];
+  spuWrite(PS1_SPUCNT,PS1_SPUCNT_ON|((noiseFreq&0x3f)<<8));
+  spuWrite(PS1_EVOL_L,0);
+  spuWrite(PS1_EVOL_R,0);
+  if (p.size>0 && !skipRegisterWrites) {
+    spu->writeRAM(reverbBase(),ps1ReverbZero,p.size);
+  }
+  spuWrite(PS1_MBASE,p.size>0?(reverbBase()>>3):0);
+  for (int i=0; i<32; i++) {
+    spuWrite(PS1_REVERB_REGS+i*2,p.regs[i]);
+  }
+  if (p.size>0) {
+    spuWrite(PS1_EVOL_L,(unsigned short)(short)(reverbVolL*256));
+    spuWrite(PS1_EVOL_R,(unsigned short)(short)(reverbVolR*256));
+  }
+  writeCtrl();
+}
 
 void DivPlatformPS1::spuWrite(unsigned int addr, unsigned short val) {
   if (skipRegisterWrites) return;
@@ -219,6 +335,11 @@ int DivPlatformPS1::dispatch(DivCommand c) {
     case DIV_CMD_GET_VOLMAX:
       return 127;
       break;
+    case DIV_CMD_STD_NOISE_FREQ:
+      // the noise clock is global: SPUCNT bits 13-8 (shift 13-10, step 9-8).
+      noiseFreq=c.value&0x3f;
+      writeCtrl();
+      break;
     case DIV_CMD_MACRO_OFF:
       chan[c.chan].std.mask(c.value,true);
       break;
@@ -282,6 +403,8 @@ void DivPlatformPS1::reset() {
     spuWrite(r,0);
     spuWrite(r+2,0);
   }
+  noiseFreq=PS1_NOISE_DEFAULT;
+  writeReverb();
   for (int i=0; i<24; i++) {
     chan[i]=DivPlatformPS1::Channel(parent->song.compatFlags.linearPitch);
     chan[i].pitchTable=samplePitchTable.get(-1);
@@ -322,6 +445,13 @@ void DivPlatformPS1::setFlags(const DivConfig& flags) {
   for (int i=0; i<24; i++) {
     oscBuf[i]->setRate(rate);
   }
+  int preset=flags.getInt("reverbPreset",0);
+  if (preset<0 || preset>=REVERB_PRESETS) preset=0;
+  reverbPreset=preset;
+  reverbVolL=MAX(-128,MIN(127,flags.getInt("reverbVolL",48)));
+  reverbVolR=MAX(-128,MIN(127,flags.getInt("reverbVolR",48)));
+  // a changed work area size also needs renderSamples (the GUI asks for it).
+  writeReverb();
   notifyPitchTable();
 }
 
@@ -338,7 +468,7 @@ const void* DivPlatformPS1::getSampleMem(int index) {
 }
 
 size_t DivPlatformPS1::getSampleMemCapacity(int index) {
-  return index==0?PS1SPUBridge::RAM_SIZE:0;
+  return index==0?reverbBase():0;
 }
 
 size_t DivPlatformPS1::getSampleMemUsage(int index) {
@@ -371,18 +501,24 @@ void DivPlatformPS1::renderSamples(int sysID) {
   memCompo.name="SPU RAM";
   memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_RESERVED,"Capture buffers",-1,0,PS1_SAMPLE_BASE));
 
+  // the reverb work area takes the top of SPU RAM.
+  const size_t memTop=reverbBase();
   size_t memPos=PS1_SAMPLE_BASE;
   for (int i=0; i<parent->song.sampleLen && i<32768; i++) {
     DivSample* s=parent->song.sample[i];
     if (s->data16==NULL || s->samples==0) continue;
     if (!s->renderOn[0][sysID]) continue;
     size_t need=PS1SPUBridge::encodedSize(s->samples);
-    if (memPos+need>PS1SPUBridge::RAM_SIZE) {
-      logW("out of PS1 SPU memory for sample %d!",i);
+    if (memPos+need>memTop) {
+      if (memTop<PS1SPUBridge::RAM_SIZE) {
+        logW("out of PS1 SPU memory for sample %d! (the reverb work area takes %d bytes)",i,(int)(PS1SPUBridge::RAM_SIZE-memTop));
+      } else {
+        logW("out of PS1 SPU memory for sample %d!",i);
+      }
       break;
     }
     int loopStart=s->isLoopable()?s->loopStart:-1;
-    size_t len=PS1SPUBridge::encodeADPCM(s->data16,s->samples,loopStart,s->loopEnd,sampleMem+memPos,PS1SPUBridge::RAM_SIZE-memPos);
+    size_t len=PS1SPUBridge::encodeADPCM(s->data16,s->samples,loopStart,s->loopEnd,sampleMem+memPos,memTop-memPos);
     if (len==0) continue;
     sampleOff[i]=memPos;
     sampleLoaded[i]=true;
@@ -390,7 +526,10 @@ void DivPlatformPS1::renderSamples(int sysID) {
     memPos+=len;
   }
   sampleMemLen=memPos;
-  memCompo.used=sampleMemLen;
+  if (memTop<PS1SPUBridge::RAM_SIZE) {
+    memCompo.entries.push_back(DivMemoryEntry(DIV_MEMORY_ECHO,"Reverb work area",-1,memTop,PS1SPUBridge::RAM_SIZE));
+  }
+  memCompo.used=sampleMemLen+(PS1SPUBridge::RAM_SIZE-memTop);
   memCompo.capacity=PS1SPUBridge::RAM_SIZE;
   uploadSamples();
 }
@@ -430,7 +569,11 @@ DivPlatformPS1::DivPlatformPS1():
   sampleMemLen(0),
   pmonMask(0),
   nonMask(0),
-  eonMask(0) {
+  eonMask(0),
+  reverbPreset(0),
+  reverbVolL(48),
+  reverbVolR(48),
+  noiseFreq(PS1_NOISE_DEFAULT) {
   sampleOff=new unsigned int[32768];
   sampleLoaded=new bool[32768];
   memset(sampleOff,0,32768*sizeof(unsigned int));

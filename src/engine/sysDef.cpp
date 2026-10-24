@@ -2825,7 +2825,10 @@ void DivEngine::registerSystems() {
     false, true, 0, false, (1U<<DIV_SAMPLE_DEPTH_16BIT), 0, 0,
     _("the sound processor of Sony's first video game console. 24 channels of ADPCM samples with hardware envelopes and reverb."),
     DivChanDefFunc(simpleChanDef<DIV_CH_PCM,DIV_INS_PS1,DIV_INS_AMIGA>),
-    {}
+    {},
+    {
+      {0x1d, {DIV_CMD_STD_NOISE_FREQ, _("1Dxx: Set noise frequency (00 to 3F; global, for voices with noise on)")}},
+    }
   );
 
   sysDefs[DIV_SYSTEM_DUMMY]=new DivSysDef(
