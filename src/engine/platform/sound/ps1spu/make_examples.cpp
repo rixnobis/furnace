@@ -3,12 +3,14 @@
 // make_corpus.cpp): one DIV_SYSTEM_PS1 chip, one engine tick per score tick, speed = score
 // ticks per row, one pattern per order then deduplicated per channel (key-offs between rows as FCxx delayed note release), samples as 16-bit PCM,
 // PS1 instruments with the bank's ADSR words.
-// usage: ps1_examples <intermediate dir> <out.fur>
+// usage: ps1_examples <intermediate dir> <out.fur> [--reverb <preset>]
+//   --reverb: system flag "reverbPreset" (0 = off, 5 = Hall: what the PS1 player sets up, at
+//   output volume 0x3000 = the flags' default); instruments carry the score's CC91 send.
 //   <dir>/song.txt: song/sample/ins/cell lines (format in score2ps1.py), <dir>/sNN.raw: PCM
 // regenerating both examples (from papers/ps1-examples/):
 //   python3 tools/score2ps1.py src/keynote.mid src/keynote.vab /tmp/k "One More Thing (keynote)"
 //   python3 tools/score2ps1.py src/forty-one-cycles.mid src/forty-one-cycles.vab /tmp/f "Forty-One Cycles" --names kitb
-//   ps1_examples /tmp/k keynote.fur && ps1_examples /tmp/f forty-one-cycles.fur
+//   ps1_examples /tmp/k keynote.fur --reverb 5 && ps1_examples /tmp/f forty-one-cycles.fur --reverb 5
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,8 +121,12 @@ static int info(DivEngine& e, const char* path) {
 
 int main(int argc, char** argv) {
   if (argc<3) {
-    fprintf(stderr,"usage: %s <intermediate dir> <out.fur> | --info <file.fur>\n",argv[0]);
+    fprintf(stderr,"usage: %s <intermediate dir> <out.fur> [--reverb <preset>] | --info <file.fur>\n",argv[0]);
     return 1;
+  }
+  int reverbPreset=-1;
+  if (argc>=5 && strcmp(argv[3],"--reverb")==0) {
+    reverbPreset=atoi(argv[4]);
   }
   if (strcmp(argv[1],"--info")==0) {
     DivEngine e;
@@ -145,6 +151,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   e.createNew("id0=225\n","Sony PlayStation",false);
+  if (reverbPreset>=0) e.song.systemFlags[0].set("reverbPreset",reverbPreset);
   DivSubSong* sub=e.song.subsong[0];
   int patLen=0, rows=0, cells=0, speed=1, lastSpeed=1, perBeat=4;
   char line[1024];
