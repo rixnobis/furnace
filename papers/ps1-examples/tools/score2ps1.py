@@ -6,7 +6,11 @@
 #   <out>/sNN.raw    - 16-bit little-endian mono PCM per sample, decoded from the bank's ADPCM
 #
 # The mapping follows the PS1 player (nugget psmplayer) note for note:
-#   - one Furnace row per MIDI tick: speed 1, rate = PPQ * bpm / 60 Hz (exact, no quantization)
+#   - engine tick = MIDI tick: rate = PPQ * bpm / 60 Hz. rows are a grid of ticks: a quarter
+#     of a beat (PPQ/4 ticks = speed) when every note-on lands on it, else the GCD of the
+#     note-on ticks; note-ons never move. a key-off between rows is an FCxx (delayed note
+#     release = SPU key-off) on its row, so every key-off stays on its exact tick. a loop end
+#     off the grid shortens the last row with 0Fxx (restored by 0Fxx on row 0).
 #   - every VAB tone whose key range holds the note sounds (stereo layers = two voices)
 #   - voices are allocated like psmplayer (first voice not holding a note), channel = SPU voice
 #   - volume = vel^2/127 * CC7 * CC11 * tone vol / 127^3 (0..127), pan = CC10 + tone pan
@@ -16,13 +20,16 @@
 # usage: score2ps1.py <song.mid> <bank.vab> <outdir> <title> [--psm song.psm] [--names song]
 #
 # song.txt lines:
-#   song <hz> <patLen> <rows> <title>
+#   song <hz> <patLen> <rows> <speed> <lastRowSpeed> <rowsPerBeat> <title>
 #   sample <id> <c4rate> <loopStart|-1> <loopEnd> <name>
 #   ins <id> <sample> <adsr1 hex> <adsr2 hex> <reverb 0/1> <name>
-#   cell <ch> <row> <note|off> <ins> <vol> <panL> <panR>      (panL/panR -1 = unchanged)
+#   cell <ch> <row> <note|off> <ins> <vol> <panL> <panR> <delay>   (panL/panR -1 = unchanged;
+#        delay = ticks into the row, key-offs only: 0 = OFF cell, >0 = FCxx effect)
 import os
+import math
 import struct
 import sys
+from functools import reduce
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -216,25 +223,36 @@ def main():
             cells.append((v, tick, 'off', -1, -1, -1, -1))
         maxpoly = max(maxpoly, sum(1 for x in voice if x is not None))
 
-    patlen = 4 * ppq  # one 4/4 bar per pattern
-    # the PS1 player loops at END: tick END is tick 0 again, so the song is END rows long
-    rows = endtick
-    # note-offs on the END tick land on row 0 of the next pass, as they do in the player
-    # (a key-on on the same voice at row 0 wins there too). nothing else sits on END.
-    assert all(c[1] < rows or c[2] == 'off' for c in cells)
+    # the PS1 player loops at END: tick END is tick 0 again, so the song is END ticks long.
+    # note-offs on the END tick land on tick 0 of the next pass, as they do in the player
+    # (a key-on on the same voice at tick 0 wins there too). nothing else sits on END.
+    assert all(c[1] < endtick or c[2] == 'off' for c in cells)
     row0 = {c[0] for c in cells if c[1] == 0}
-    cells = [c if c[1] < rows else (c[0], 0) + c[2:] for c in cells
-             if c[1] < rows or c[0] not in row0]
+    cells = [c if c[1] < endtick else (c[0], 0) + c[2:] for c in cells
+             if c[1] < endtick or c[0] not in row0]
+    # ---- row grid: every note-on on a row; key-offs between rows become FCxx
+    g_on = reduce(math.gcd, [c[1] for c in cells if c[2] != 'off'])
+    grid = ppq // 4 if g_on % (ppq // 4) == 0 else g_on
+    rows = -(-endtick // grid)
+    lastspeed = endtick - (rows - 1) * grid
+    patlen = 4 * ppq // grid  # one 4/4 bar per pattern
+    cells = [(c[0], c[1] // grid) + c[2:] + (c[1] % grid,) for c in cells]
+    assert all(c[7] == 0 or c[2] == 'off' for c in cells)
+    # per voice and row: at most one note-on and one key-off, and a key-off sharing a row
+    # with a note-on comes after it (delay > 0), so the two fit in one cell.
+    kinds = Counter((c[0], c[1], c[2] == 'off') for c in cells)
+    assert max(kinds.values()) == 1
+    assert all(not (c[2] == 'off' and c[7] == 0 and (c[0], c[1], False) in kinds) for c in cells)
     with open(os.path.join(out, 'song.txt'), 'w') as f:
-        f.write('song %.6f %d %d %s\n' % (hz, patlen, rows, title))
+        f.write('song %.6f %d %d %d %d %d %s\n' % (hz, patlen, rows, grid, lastspeed, ppq // grid, title))
         for s in sinfo:
             f.write('sample %d %d %d %d %s\n' % s)
         for i in iinfo:
             f.write('ins %d %d %04x %04x %d %s\n' % i)
         for c in sorted(cells, key=lambda x: (x[1], x[0])):
-            f.write('cell %d %d %s %d %d %d %d\n' % c)
-    print('%s: %.4f Hz rows=%d (%.2f s) patLen=%d samples=%d instruments=%d cells=%d max voices=%d '
-          'VAB ADPCM=%d B' % (title, hz, rows, rows / hz, patlen, len(sinfo), len(iinfo), len(cells),
+            f.write('cell %d %d %s %d %d %d %d %d\n' % c)
+    print('%s: %.4f Hz grid=%d ticks (note-on GCD %d) rows=%d (%.2f s) patLen=%d samples=%d instruments=%d cells=%d max voices=%d '
+          'VAB ADPCM=%d B' % (title, hz, grid, g_on, rows, endtick / hz, patlen, len(sinfo), len(iinfo), len(cells),
                               maxpoly, bank['ram']))
     for i in iinfo:
         s = sinfo[i[1]]
