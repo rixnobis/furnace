@@ -1,13 +1,16 @@
 // Ours. Headless positive/negative control for DivPlatformPS1.
 // Instantiates the platform directly with a bare DivEngine (never init()ed) as parent,
 // holding one 44100 Hz 1 kHz sine sample and one Amiga-type instrument.
-// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan> <out.wav>
+// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan|reverb|noise|pmod> <out.wav>
 //   on/off: one instance, note on / no note, 0.5 s
 //   two:    instances A (note on) and B (no note) rendered alternately, tick by tick, 0.5 s
 //   time:   one instance, note on, 10 s, prints the wall time of the render loop
 //   fmt:    DIV_INS_PS1 instrument serialize/deserialize round trip (+ negative control)
 //   adsr:   fast vs slow attack, then release after note off
 //   pan:    full left vs full right
+//   reverb: 10 ms burst with reverb off/presets: tail RMS after the dry end, tail length
+//   noise:  NON on/off: spectral flatness/centroid, centroid vs noise clock (1Dxx)
+//   pmod:   voice 0 5 Hz sine modulating voice 1 1 kHz (PMON): frequency range
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -204,9 +207,271 @@ static size_t renderNote(DivEngine& e, DivPlatformPS1& ps1, int panL, int panR, 
   return offPos;
 }
 
+// ---- reverb / noise / pitch modulation arms ----
+
+struct NoteOn {
+  int ch, ins, note;
+};
+
+// fresh instance with the given system flags; optional 1Dxx (noise clock) before the notes;
+// all notes keyed on the first tick; total samples rendered tick by tick.
+static void renderSeq(DivEngine& e, const DivConfig& flags, const std::vector<NoteOn>& ons, int noiseFreq, size_t total, std::vector<short>& L, std::vector<short>& R) {
+  const size_t tickLen=44100/60;
+  L.assign(total,0); R.assign(total,0);
+  DivPlatformPS1 p;
+  p.init(&e,24,44100,flags);
+  p.renderSamples(0);
+  if (noiseFreq>=0) p.dispatch(DivCommand(DIV_CMD_STD_NOISE_FREQ,0,noiseFreq));
+  for (const NoteOn& n: ons) {
+    p.dispatch(DivCommand(DIV_CMD_INSTRUMENT,n.ch,n.ins));
+    p.dispatch(DivCommand(DIV_CMD_NOTE_ON,n.ch,n.note));
+  }
+  size_t pos=0;
+  while (pos<total) {
+    p.tick(true);
+    size_t n=std::min(tickLen,total-pos);
+    short* bufs[2]={&L[pos],&R[pos]};
+    p.acquire(bufs,n);
+    pos+=n;
+  }
+  p.quit();
+}
+
+static int addSample(DivEngine& e, DivSample* s) {
+  e.song.sample.push_back(s);
+  e.song.sampleLen=e.song.sample.size();
+  return e.song.sampleLen-1;
+}
+
+static int addPS1Ins(DivEngine& e, int sample, bool reverb, bool noise, bool pitchMod) {
+  DivInstrument* ins=new DivInstrument;
+  ins->type=DIV_INS_PS1;
+  ins->amiga.initSample=sample;
+  ins->ps1.reverb=reverb;
+  ins->ps1.noise=noise;
+  ins->ps1.pitchMod=pitchMod;
+  e.song.ins.push_back(ins);
+  e.song.insLen=e.song.ins.size();
+  return e.song.insLen-1;
+}
+
+static DivSample* newSample(int len, int rate) {
+  DivSample* s=new DivSample;
+  s->depth=DIV_SAMPLE_DEPTH_16BIT;
+  s->centerRate=rate;
+  s->init(len);
+  return s;
+}
+
+static size_t lastNonZero(const std::vector<short>& L, const std::vector<short>& R) {
+  size_t last=0;
+  for (size_t i=0; i<L.size(); i++) if (L[i]!=0 || R[i]!=0) last=i;
+  return last;
+}
+
+static int reverbArm(DivEngine& e) {
+  const int rate=44100;
+  // 10 ms decaying noise burst, one-shot: the dry note is over after 10 ms.
+  DivSample* b=newSample(441,rate);
+  unsigned int lcg=1;
+  for (int i=0; i<441; i++) {
+    lcg=lcg*1103515245+12345;
+    b->data16[i]=(short)((((int)((lcg>>16)&0x7fff))-16384)*(441-i)/441);
+  }
+  int sb=addSample(e,b);
+  int insRev=addPS1Ins(e,sb,true,false,false);
+  int insDry=addPS1Ins(e,sb,false,false,false);
+  const size_t total=rate*8;
+  std::vector<short> L, R;
+  bool ok=true;
+
+  // dry end: the last nonzero sample with reverb off.
+  DivConfig off;
+  renderSeq(e,off,{{0,insRev,108}},-1,total,L,R);
+  size_t dryEnd=lastNonZero(L,R);
+  double offTail=rmsOf(L,dryEnd+rate/5,rate*3/10)+rmsOf(R,dryEnd+rate/5,rate*3/10);
+  printf("reverb off (preset 0, ins reverb flag on): dry ends at %.1f ms; RMS(L)+RMS(R) 200-500 ms after = %.3f\n",1000.0*dryEnd/rate,offTail);
+  if (offTail!=0) ok=false;
+
+  for (int preset: {1,5,7,2}) {
+    DivConfig f;
+    f.set("reverbPreset",preset);
+    renderSeq(e,f,{{0,insRev,108}},-1,total,L,R);
+    double w[3];
+    for (int k=0; k<3; k++) w[k]=rmsOf(L,dryEnd+rate/5+k*rate/10,rate/10);
+    double tail=rmsOf(L,dryEnd+rate/5,rate*3/10);
+    // tail length: first 50 ms window (after the dry end) whose RMS is under 1/1000 (-60 dB)
+    // of the loudest 50 ms window, and the last nonzero output sample.
+    double peakW=0;
+    size_t peakPos=dryEnd;
+    for (size_t pos=dryEnd; pos+rate/20<=total; pos+=rate/20) {
+      double r=rmsOf(L,pos,rate/20);
+      if (r>peakW) { peakW=r; peakPos=pos; }
+    }
+    size_t t60=0;
+    for (size_t pos=peakPos; pos+rate/20<=total; pos+=rate/20) {
+      if (rmsOf(L,pos,rate/20)<peakW/1000) { t60=pos; break; }
+    }
+    size_t last=lastNonZero(L,R);
+    printf("reverb %-13s (size %05x): tail RMS 200-500 ms=%.1f [200-300 %.1f, 300-400 %.1f, 400-500 %.1f]; -60 dB at %s%.0f ms; last nonzero %.0f ms%s\n",
+      DivPlatformPS1::reverbPresetName(preset),DivPlatformPS1::reverbSize(preset),tail,w[0],w[1],w[2],
+      t60?"":">",1000.0*((t60?t60:total)-dryEnd)/rate,1000.0*(last-dryEnd)/rate,(last>=total-1)?" (still sounding at end)":"");
+    if (!(tail>0 && w[0]>w[1] && w[1]>w[2])) ok=false;
+  }
+  // negative control: preset on, instrument reverb flag off.
+  {
+    DivConfig f;
+    f.set("reverbPreset",5);
+    renderSeq(e,f,{{0,insDry,108}},-1,total,L,R);
+    double t=rmsOf(L,dryEnd+rate/5,rate*3/10)+rmsOf(R,dryEnd+rate/5,rate*3/10);
+    printf("reverb Hall, ins reverb flag off: RMS 200-500 ms after = %.3f\n",t);
+    if (t!=0) ok=false;
+  }
+  printf("reverb arm: %s\n",ok?"OK":"FAIL");
+  return ok?0:1;
+}
+
+// in-place radix-2 FFT
+static void fft(std::vector<double>& re, std::vector<double>& im) {
+  const size_t n=re.size();
+  for (size_t i=1, j=0; i<n; i++) {
+    size_t bit=n>>1;
+    for (; j&bit; bit>>=1) j^=bit;
+    j^=bit;
+    if (i<j) { std::swap(re[i],re[j]); std::swap(im[i],im[j]); }
+  }
+  for (size_t len=2; len<=n; len<<=1) {
+    double a=-2.0*M_PI/len;
+    for (size_t i=0; i<n; i+=len) {
+      for (size_t k=0; k<len/2; k++) {
+        double wr=cos(a*k), wi=sin(a*k);
+        double xr=re[i+k+len/2]*wr-im[i+k+len/2]*wi;
+        double xi=re[i+k+len/2]*wi+im[i+k+len/2]*wr;
+        re[i+k+len/2]=re[i+k]-xr; im[i+k+len/2]=im[i+k]-xi;
+        re[i+k]+=xr; im[i+k]+=xi;
+      }
+    }
+  }
+}
+
+// averaged Hann-windowed power spectrum (4096 bins) of [from,from+frames*4096)
+static void spectrum(const std::vector<short>& x, size_t from, int frames, double& flatness, double& centroid, double& peakHz, double& peakShare) {
+  const size_t n=4096;
+  std::vector<double> P(n/2,0.0);
+  for (int f=0; f<frames; f++) {
+    std::vector<double> re(n), im(n,0.0);
+    for (size_t i=0; i<n; i++) re[i]=x[from+f*n+i]*(0.5-0.5*cos(2.0*M_PI*i/(n-1)));
+    fft(re,im);
+    for (size_t k=0; k<n/2; k++) P[k]+=re[k]*re[k]+im[k]*im[k];
+  }
+  double logSum=0, sum=0, fSum=0, best=0;
+  size_t bestK=1;
+  for (size_t k=1; k<n/2; k++) {
+    double p=P[k]+1e-9;
+    logSum+=log(p); sum+=p; fSum+=p*k*44100.0/n;
+    if (p>best) { best=p; bestK=k; }
+  }
+  const double m=n/2-1;
+  flatness=exp(logSum/m)/(sum/m);
+  centroid=fSum/sum;
+  peakHz=bestK*44100.0/n;
+  double near=0;
+  for (size_t k=(bestK>3?bestK-3:1); k<=bestK+3 && k<n/2; k++) near+=P[k];
+  peakShare=near/sum;
+}
+
+static int noiseArm(DivEngine& e) {
+  const int rate=44100;
+  DivSample* s=newSample(rate,rate);
+  for (int i=0; i<rate; i++) s->data16[i]=(short)round(16000.0*sin(2.0*M_PI*1000.0*i/rate));
+  int ss=addSample(e,s);
+  int insNoise=addPS1Ins(e,ss,false,true,false);
+  int insTone=addPS1Ins(e,ss,false,false,false);
+  std::vector<short> L, R;
+  double fl, ce, pk, sh;
+  bool ok=true;
+  renderSeq(e,DivConfig(),{{0,insTone,108}},-1,rate/2,L,R);
+  spectrum(L,rate/10,4,fl,ce,pk,sh);
+  printf("noise flag off: flatness=%.4f centroid=%.0f Hz peak=%.0f Hz (share of energy within +-3 bins: %.3f)\n",fl,ce,pk,sh);
+  if (!(sh>0.9 && fabs(pk-1000)<20)) ok=false;
+  double lastCe=0;
+  for (int nf: {-1,0x08,0x18,0x28,0x38,0x3f}) {
+    renderSeq(e,DivConfig(),{{0,insNoise,108}},nf,rate/2,L,R);
+    spectrum(L,rate/10,4,fl,ce,pk,sh);
+    printf("noise flag on, clock %s%02x: flatness=%.4f centroid=%.0f Hz peak share=%.3f RMS=%.1f\n",nf<0?"default ":"",nf<0?0x20:nf,fl,ce,sh,rmsOf(L,rate/10,rate/4));
+    if (nf>=0) {
+      if (ce<=lastCe) ok=false;
+      lastCe=ce;
+    }
+    // broadband from the default (mid) clock up; the lowest clocks step the LFSR only a few
+    // times in the window, so their energy sits near DC.
+    if ((nf<0 || nf>=0x20) && sh>0.5) ok=false;
+  }
+  printf("noise arm: %s\n",ok?"OK":"FAIL");
+  return ok?0:1;
+}
+
+// instantaneous frequency of the left channel from rising zero crossings (linearly
+// interpolated), averaged over 10 ms windows; min/max over [from,to).
+static void freqRange(const std::vector<short>& x, size_t from, size_t to, double& fMin, double& fMax) {
+  const int rate=44100;
+  std::vector<double> xs;
+  for (size_t i=from+1; i<to; i++) {
+    if (x[i-1]<0 && x[i]>=0) xs.push_back((i-1)+(double)(-x[i-1])/(double)(x[i]-x[i-1]));
+  }
+  fMin=1e9; fMax=0;
+  const double win=rate/100.0;
+  size_t j=0;
+  for (double t=from; t+win<=to; t+=win) {
+    while (j<xs.size() && xs[j]<t) j++;
+    size_t k=j;
+    while (k+1<xs.size() && xs[k+1]<t+win) k++;
+    if (k<=j) continue;
+    double f=(double)(k-j)*rate/(xs[k]-xs[j]);
+    fMin=std::min(fMin,f); fMax=std::max(fMax,f);
+  }
+}
+
+static int pmodArm(DivEngine& e) {
+  const int rate=44100;
+  DivSample* c=newSample(rate,rate);
+  for (int i=0; i<rate; i++) c->data16[i]=(short)round(16000.0*sin(2.0*M_PI*1000.0*i/rate));
+  int sc=addSample(e,c);
+  // modulator: 5 Hz sine, one second looped (5 whole cycles)
+  DivSample* m=newSample(rate,rate);
+  for (int i=0; i<rate; i++) m->data16[i]=(short)round(16000.0*sin(2.0*M_PI*5.0*i/rate));
+  m->loop=true; m->loopStart=0; m->loopEnd=rate; m->loopMode=DIV_SAMPLE_LOOP_FORWARD;
+  int sm=addSample(e,m);
+  int insMod=addPS1Ins(e,sm,false,false,false);
+  int insCarPM=addPS1Ins(e,sc,false,false,true);
+  int insCar=addPS1Ins(e,sc,false,false,false);
+  std::vector<short> L, R;
+  double lo, hi, lo0, hi0, loV0, hiV0;
+  renderSeq(e,DivConfig(),{{0,insMod,108},{1,insCar,108}},-1,rate*3/4,L,R);
+  freqRange(L,rate/10,rate*7/10,lo0,hi0);
+  printf("pitch mod off (voice 0 5 Hz sine, voice 1 1 kHz): voice-1 frequency over 10 ms windows min=%.1f max=%.1f Hz\n",lo0,hi0);
+  renderSeq(e,DivConfig(),{{0,insMod,108},{1,insCarPM,108}},-1,rate*3/4,L,R);
+  freqRange(L,rate/10,rate*7/10,lo,hi);
+  printf("pitch mod on  (voice 1 PMON): min=%.1f max=%.1f Hz\n",lo,hi);
+  // voice 0 cannot be modulated: the flag on voice 0 alone must change nothing.
+  renderSeq(e,DivConfig(),{{0,insCarPM,108}},-1,rate*3/4,L,R);
+  freqRange(L,rate/10,rate*7/10,loV0,hiV0);
+  printf("pitch mod flag on voice 0 (ignored): min=%.1f max=%.1f Hz\n",loV0,hiV0);
+  // without modulation the spread is the estimator's own (+-1 crossing per 10 ms window).
+  bool ok=(hi0-lo0)<20 && (hi-lo)>200 && (hiV0-loV0)<20;
+  printf("pitch mod arm: %s\n",ok?"OK":"FAIL");
+  return ok?0:1;
+}
+
 int main(int argc, char** argv) {
   const char* mode=argc>1?argv[1]:"on";
   if (strcmp(mode,"fmt")==0) return fmtArm();
+  if (strcmp(mode,"reverb")==0 || strcmp(mode,"noise")==0 || strcmp(mode,"pmod")==0) {
+    DivEngine e;
+    if (strcmp(mode,"reverb")==0) return reverbArm(e);
+    if (strcmp(mode,"noise")==0) return noiseArm(e);
+    return pmodArm(e);
+  }
   bool noteOn=strcmp(mode,"off")!=0;
   bool two=strcmp(mode,"two")==0;
   bool timed=strcmp(mode,"time")==0;

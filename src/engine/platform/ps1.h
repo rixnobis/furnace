@@ -25,8 +25,8 @@
 #include "sound/ps1spu/bridge.h"
 
 // Sony PlayStation SPU, emulated by the pcsx-redux core (sound/ps1spu).
-// note on/off with samples, per-instrument ADSR, volume, panning, and the per-voice
-// reverb/noise/pitch-mod enable bits. everything else is not implemented yet.
+// note on/off with samples, per-instrument ADSR, volume, panning, the per-voice
+// reverb/noise/pitch-mod enable bits, reverb presets (system flags) and the noise clock (1Dxx).
 class DivPlatformPS1: public DivDispatch {
   struct Channel: public SharedChannel {
     int sample;
@@ -61,6 +61,12 @@ class DivPlatformPS1: public DivDispatch {
   unsigned short regPool[256];
   // per-voice enable bits (bit n = voice n), as last written to PMON/NON/EON.
   unsigned int pmonMask, nonMask, eonMask;
+  // system flags: reverb preset (index into the psx-spx preset table, 0 = off) and the
+  // reverb output volume (vLOUT/vROUT = vol<<8, -128..127).
+  int reverbPreset;
+  int reverbVolL, reverbVolR;
+  // SPUCNT bits 13-8: noise clock (shift<<2 | step).
+  unsigned char noiseFreq;
 
   friend void putDispatchChip(void*,int);
   friend void putDispatchChan(void*,int,int);
@@ -69,6 +75,9 @@ class DivPlatformPS1: public DivDispatch {
   void voiceWrite(int ch, unsigned int reg, unsigned short val);
   void uploadSamples();
   void writeMask(unsigned int regLo, unsigned int& mask, int ch, bool on, bool force=false);
+  void writeCtrl();
+  void writeReverb();
+  unsigned int reverbBase();
   public:
     void acquire(short** buf, size_t len);
     int dispatch(DivCommand c);
@@ -98,6 +107,11 @@ class DivPlatformPS1: public DivDispatch {
     void renderSamples(int chipID);
     int init(DivEngine* parent, int channels, int sugRate, const DivConfig& flags);
     void quit();
+    static const int REVERB_PRESETS=10;
+    // preset name, in flag order ("reverbPreset" 0..REVERB_PRESETS-1)
+    static const char* reverbPresetName(int preset);
+    // work area size in bytes of a preset (0 for off)
+    static unsigned int reverbSize(int preset);
     DivPlatformPS1();
     ~DivPlatformPS1();
 };
