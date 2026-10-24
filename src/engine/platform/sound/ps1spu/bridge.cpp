@@ -1,22 +1,13 @@
 // Ours. See bridge.h. This TU is C++20, like the vendored core.
 //
 // The core is driven synchronously: render() runs the mixer on the caller's thread, one
-// instance at a time, with no mixer thread and no shared lock.
-//
-// The vendored impl only exposes the threaded path (open() always starts MainThread, and
-// mixChunk/applyDueEvents are private). Rather than edit vendored files, the bridge reaches
-// the private members it needs through explicit template instantiation, where access checks
-// do not apply ([temp.spec.general]/6 in C++20). What it uses:
-//   mixChunk, applyDueEvents     - the body of MainThread's loop, run here instead
-//   m_mixPos, m_events*, pS, spuBuffer, SSumL - the mixer clock, event queue and output buffer
-//   RemoveThread, RemoveStreams, spuIsOpen  - stop the thread open() starts; close without it
-// If upstream renames any of these, this TU stops compiling (it cannot silently misbind).
+// instance at a time, with no mixer thread and no shared lock, through the core's embedding
+// API (impl::openSynchronous / impl::mixSynchronous).
 #include "bridge.h"
 
 #include <string.h>
 
 #include <algorithm>
-#include <type_traits>
 #include <vector>
 
 #include "core/psxemulator.h"
@@ -28,33 +19,9 @@ namespace {
 
 using PCSX::SPU::impl;
 
-template <typename Tag, auto Member>
-struct Expose {
-    friend auto get(Tag) { return Member; }
-};
-#define PS1SPU_EXPOSE(tag, member) \
-    struct tag {                   \
-        friend auto get(tag);      \
-    };                             \
-    template struct Expose<tag, &impl::member>
-
-PS1SPU_EXPOSE(MixChunk, mixChunk);
-PS1SPU_EXPOSE(ApplyDueEvents, applyDueEvents);
-PS1SPU_EXPOSE(RemoveThread, RemoveThread);
-PS1SPU_EXPOSE(RemoveStreams, RemoveStreams);
-PS1SPU_EXPOSE(SpuIsOpen, spuIsOpen);
-PS1SPU_EXPOSE(MixPos, m_mixPos);
-PS1SPU_EXPOSE(Events, m_events);
-PS1SPU_EXPOSE(EventsApplied, m_eventsApplied);
-PS1SPU_EXPOSE(EventsPushed, m_eventsPushed);
-PS1SPU_EXPOSE(OutPtr, pS);
-PS1SPU_EXPOSE(OutBuf, spuBuffer);
-PS1SPU_EXPOSE(SumL, SSumL);
-#undef PS1SPU_EXPOSE
-
 // The core's clock: 768 CPU cycles per 44.1 kHz sample.
 constexpr uint64_t kCyclesPerSample = PCSX::Emulator::m_psxClockSpeed / 44100;
-// Largest step published to the core at once; it resyncs on forward jumps over a second.
+// Interleaved scratch for one render step.
 constexpr size_t kMaxRenderChunk = 4096;
 
 }  // namespace
@@ -65,6 +32,7 @@ struct PS1SPUBridge::Impl {
     impl* spu = nullptr;
     // output samples handed to the caller so far
     uint64_t delivered = 0;
+    int16_t scratch[kMaxRenderChunk * 2];
 
     // Points the core's (thread_local) g_emulator at this instance for the scope.
     struct Use {
@@ -82,10 +50,7 @@ struct PS1SPUBridge::Impl {
     void open() {
         delivered = 0;
         emu.m_cpu->m_regs.cycle = 0;
-        spu->open();
-        // open() always starts the mixer thread. Stop it straight away: it has nothing to mix
-        // yet (the horizon is at cycle 0), and from here on mix() does its job.
-        (spu->*get(RemoveThread{}))();
+        spu->openSynchronous();
         // SPUCNT: enabled, unmuted. Main volume at max.
         setCycleForWrites();
         spu->writeRegister(H_SPUctrl, 0xc000);
@@ -93,45 +58,7 @@ struct PS1SPUBridge::Impl {
         spu->writeRegister(0x0d82, 0x3fff);
     }
 
-    // impl::close() would wait forever for the thread that open() already stopped, so do the
-    // rest of what it does here.
-    void close() {
-        int& isOpen = spu->*get(SpuIsOpen{});
-        if (!isOpen) return;
-        isOpen = 0;
-        (spu->*get(RemoveStreams{}))();
-    }
-
-    // MainThread's loop body, run until samples [0, target) are mixed, with the CPU side
-    // already at target (so every queued write due before it is visible).
-    void mix(uint64_t target, short* outL, short* outR) {
-        constexpr uint64_t chunkMax = std::extent_v<std::remove_reference_t<decltype(spu->*get(SumL{}))>>;
-        uint64_t& mixPos = spu->*get(MixPos{});
-        auto& events = spu->*get(Events{});
-        constexpr uint64_t queueMask = std::extent_v<std::remove_reference_t<decltype(events)>> - 1;
-        const auto& applied = spu->*get(EventsApplied{});
-        const auto& pushed = spu->*get(EventsPushed{});
-        int16_t*& outPtr = spu->*get(OutPtr{});
-        int16_t* const outBuf = reinterpret_cast<int16_t*>(spu->*get(OutBuf{}));
-        while (mixPos < target) {
-            (spu->*get(ApplyDueEvents{}))();
-            uint64_t n = std::min(chunkMax, target - mixPos);
-            if (applied.load() != pushed.load()) {
-                // End the chunk where the next queued write comes due.
-                const uint64_t next = events[applied.load() & queueMask].sample;
-                n = next > mixPos ? std::min(n, next - mixPos) : 0;
-            }
-            if (n == 0) continue;
-            (spu->*get(MixChunk{}))(static_cast<int>(n));
-            mixPos += n;
-            const size_t frames = static_cast<size_t>(outPtr - outBuf) / 2;
-            for (size_t i = 0; i < frames; i++) {
-                if (outL) *outL++ = outBuf[i * 2];
-                if (outR) *outR++ = outBuf[i * 2 + 1];
-            }
-            outPtr = outBuf;
-        }
-    }
+    void close() { spu->close(); }
 };
 
 PS1SPUBridge::PS1SPUBridge() : p(new Impl) {
@@ -185,14 +112,12 @@ void PS1SPUBridge::render(short* outL, short* outR, size_t total) {
     size_t done = 0;
     while (done < total) {
         const size_t n = std::min(kMaxRenderChunk, total - done);
-        const uint64_t target = p->delivered + n;
-        // Moving the CPU side to cycle (target-1)*768 lets samples [0, target) be mixed, as a
-        // CPU at that cycle would.
-        const uint64_t cycle = (target - 1) * kCyclesPerSample;
-        p->emu.m_cpu->m_regs.cycle = cycle;
-        p->spu->advanceTo(cycle);
-        p->mix(target, outL ? outL + done : nullptr, outR ? outR + done : nullptr);
-        p->delivered = target;
+        p->spu->mixSynchronous(p->scratch, n);
+        for (size_t i = 0; i < n; i++) {
+            if (outL) outL[done + i] = p->scratch[i * 2];
+            if (outR) outR[done + i] = p->scratch[i * 2 + 1];
+        }
+        p->delivered += n;
         done += n;
     }
 }
