@@ -1,7 +1,7 @@
 // Ours. Builds the PS1 example songs (papers/ps1-examples/) from the intermediate written by
 // papers/ps1-examples/tools/score2ps1.py, through DivEngine's own API (same approach as
 // make_corpus.cpp): one DIV_SYSTEM_PS1 chip, one engine tick per score tick, speed = score
-// ticks per row (key-offs between rows as FCxx delayed note release), samples as 16-bit PCM,
+// ticks per row, one pattern per order then deduplicated per channel (key-offs between rows as FCxx delayed note release), samples as 16-bit PCM,
 // PS1 instruments with the bank's ADSR words.
 // usage: ps1_examples <intermediate dir> <out.fur>
 //   <dir>/song.txt: song/sample/ins/cell lines (format in score2ps1.py), <dir>/sNN.raw: PCM
@@ -45,10 +45,91 @@ static bool loadPCM(const String& path, DivSample* s) {
   return got==(size_t)len;
 }
 
+static bool samePattern(DivPattern* a, DivPattern* b, int patLen) {
+  return memcmp(a->newData,b->newData,patLen*sizeof(a->newData[0]))==0;
+}
+
+// orders are per channel: each channel's order entry indexes that channel's own patterns. one
+// pattern per order was written above; here every channel keeps one copy of each distinct
+// pattern (numbered in order of first use) and its orders point at it. empty patterns stay
+// unallocated (NULL plays as empty and is not saved), sharing one index per channel.
+static void dedupe(DivSubSong* sub, int chans) {
+  int before=0, after=0;
+  printf("unique patterns per channel (allocated before -> after):");
+  for (int ch=0; ch<chans; ch++) {
+    DivChannelData& cd=sub->pat[ch];
+    DivPattern* old[DIV_MAX_PATTERNS];
+    memcpy(old,cd.data,sizeof(old));
+    memset(cd.data,0,sizeof(cd.data));
+    DivPattern* kept[DIV_MAX_PATTERNS];
+    int keptLen=0, alloc=0;
+    for (int o=0; o<sub->ordersLen; o++) {
+      DivPattern* p=old[sub->orders.ord[ch][o]];
+      if (p!=NULL && p->isEmpty()) p=NULL;
+      int idx=0;
+      while (idx<keptLen && !((p==NULL && kept[idx]==NULL) ||
+             (p!=NULL && kept[idx]!=NULL && samePattern(p,kept[idx],sub->patLen)))) idx++;
+      if (idx==keptLen) {
+        kept[keptLen++]=p;
+        if (p!=NULL) {
+          p->copyOn(cd.getPattern(idx,true));
+          alloc++;
+        }
+      }
+      sub->orders.ord[ch][o]=idx;
+    }
+    int had=0;
+    for (int i=0; i<DIV_MAX_PATTERNS; i++) if (old[i]!=NULL) {
+      had++;
+      delete old[i];
+    }
+    printf(" %d->%d",had,alloc);
+    before+=had;
+    after+=alloc;
+  }
+  printf("; total %d->%d\n",before,after);
+}
+
+// ps1_examples --info <file.fur>: load through the engine and print the layout.
+static int info(DivEngine& e, const char* path) {
+  FILE* f=fopen(path,"rb");
+  if (f==NULL) return 1;
+  fseek(f,0,SEEK_END);
+  long len=ftell(f);
+  fseek(f,0,SEEK_SET);
+  unsigned char* buf=new unsigned char[len];
+  if (fread(buf,1,len,f)!=(size_t)len) return 1;
+  fclose(f);
+  if (!e.load(buf,len,path)) {
+    fprintf(stderr,"load failed: %s\n",e.getLastError().c_str());
+    return 1;
+  }
+  DivSubSong* sub=e.song.subsong[0];
+  int total=0;
+  printf("%s: %d orders, patLen %d, speed %d, patterns per channel:",e.song.name.c_str(),sub->ordersLen,sub->patLen,sub->speeds.val[0]);
+  for (int ch=0; ch<e.getTotalChannelCount(); ch++) {
+    int n=0;
+    for (int i=0; i<DIV_MAX_PATTERNS; i++) if (sub->pat[ch].data[i]!=NULL) n++;
+    printf(" %d",n);
+    total+=n;
+  }
+  printf("; total %d\n",total);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   if (argc<3) {
-    fprintf(stderr,"usage: %s <intermediate dir> <out.fur>\n",argv[0]);
+    fprintf(stderr,"usage: %s <intermediate dir> <out.fur> | --info <file.fur>\n",argv[0]);
     return 1;
+  }
+  if (strcmp(argv[1],"--info")==0) {
+    DivEngine e;
+    e.preInit(true);
+    e.setAudio(DIV_AUDIO_DUMMY);
+    if (!e.init()) return 1;
+    int r=info(e,argv[2]);
+    fflush(stdout);
+    _exit(r);
   }
   String dir=argv[1];
   FILE* in=fopen((dir+"/song.txt").c_str(),"r");
@@ -95,7 +176,9 @@ int main(int argc, char** argv) {
         sub->pat[ch].effectCols=3;
         for (int o=0; o<pats; o++) sub->orders.ord[ch][o]=o;
       }
-      // the last row jumps back to the start: the song loops where the PS1 player loops. when
+      // the last row jumps back to the start: the song loops where the PS1 player loops. the
+      // pattern length is one value per subsong, so when the song is not a whole number of
+      // patterns, this 0D00 also ends the final order early (the rows after it never play). when
       // the loop point is not on the grid the last row is shorter (0Fxx), and row 0 restores the
       // speed. these go on the last voice, which the songs never use (the converter allocates
       // voices from 0 up).
@@ -176,8 +259,9 @@ int main(int argc, char** argv) {
     }
   }
   fclose(in);
-  printf("%s: %d samples, %d instruments, %d cells, %d rows in %d orders\n",e.song.name.c_str(),
-         e.song.sampleLen,e.song.insLen,cells,rows,sub->ordersLen);
+  printf("%s: %d samples, %d instruments, %d cells, %d rows in %d orders of %d rows\n",e.song.name.c_str(),
+         e.song.sampleLen,e.song.insLen,cells,rows,sub->ordersLen,patLen);
+  dedupe(sub,e.getTotalChannelCount());
 
   e.renderSamples();
   SafeWriter* w=e.saveFur();

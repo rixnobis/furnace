@@ -235,7 +235,7 @@ def main():
     grid = ppq // 4 if g_on % (ppq // 4) == 0 else g_on
     rows = -(-endtick // grid)
     lastspeed = endtick - (rows - 1) * grid
-    patlen = 4 * ppq // grid  # one 4/4 bar per pattern
+    patlen = 16 * ppq // grid  # four 4/4 bars per pattern
     cells = [(c[0], c[1] // grid) + c[2:] + (c[1] % grid,) for c in cells]
     assert all(c[7] == 0 or c[2] == 'off' for c in cells)
     # per voice and row: at most one note-on and one key-off, and a key-off sharing a row
