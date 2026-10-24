@@ -927,6 +927,7 @@ src/engine/export/tiuna.cpp
 src/engine/export/zsm.cpp
 src/engine/export/ipod.cpp
 src/engine/export/grub.cpp
+src/engine/export/spudump.cpp
 
 src/engine/effect/abstract.cpp
 src/engine/effect/dummy.cpp
@@ -1602,6 +1603,20 @@ endif()
 if (PKG_CONFIG_FOUND AND NOT "${CMAKE_VERSION}" VERSION_LESS "3.13")
   target_link_directories(ps1spu_corpus PRIVATE ${DEPENDENCIES_LIBRARY_DIRS})
   target_link_options(ps1spu_corpus PRIVATE ${DEPENDENCIES_LINK_OPTIONS})
+endif()
+
+# PS1 SPUDUMP export self-consistency harness (not built by default): cmake --build <dir> --target ps1spu_spdplay
+add_executable(ps1spu_spdplay EXCLUDE_FROM_ALL ${ENGINE_SOURCES} ${AUDIO_SOURCES} src/engine/platform/sound/ps1spu/spd_replay.cpp)
+target_include_directories(ps1spu_spdplay SYSTEM PRIVATE ${DEPENDENCIES_INCLUDE_DIRS})
+target_compile_options(ps1spu_spdplay PRIVATE ${DEPENDENCIES_COMPILE_OPTIONS})
+target_compile_definitions(ps1spu_spdplay PRIVATE ${DEPENDENCIES_DEFINES})
+target_link_libraries(ps1spu_spdplay PRIVATE ${DEPENDENCIES_LIBRARIES})
+if (NOT "${CMAKE_VERSION}" VERSION_LESS "3.16")
+  target_precompile_headers(ps1spu_spdplay PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/pch.h>)
+endif()
+if (PKG_CONFIG_FOUND AND NOT "${CMAKE_VERSION}" VERSION_LESS "3.13")
+  target_link_directories(ps1spu_spdplay PRIVATE ${DEPENDENCIES_LIBRARY_DIRS})
+  target_link_options(ps1spu_spdplay PRIVATE ${DEPENDENCIES_LINK_OPTIONS})
 endif()
 
 # PS1 example songs (papers/ps1-examples, not built by default): cmake --build <dir> --target ps1_examples

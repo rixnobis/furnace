@@ -270,7 +270,38 @@ void DivPlatformPS1::spuWrite(unsigned int addr, unsigned short val) {
   addr&=0xfff;
   if (addr>=0xc00 && addr<0xe00) regPool[(addr-0xc00)>>1]=val;
   spu->writeReg(addr,val);
-  if (dumpWrites) addWrite(addr,val);
+  // register dump (SPUDUMP export): byte offset relative to 1F801C00h, as the SPUDUMP
+  // register write packet and the nugget spdplayer (spuBase[offset/2]) expect.
+  if (dumpWrites && addr>=0xc00 && addr<0xe00) addWrite(addr-0xc00,val);
+}
+
+// on enable, log the global state reset() programmed before the dump began, so that a
+// stream recorded from here on reproduces it: the voice enable masks, the reverb unit
+// (mBASE, its 32 registers, output volume) and SPUCNT. voice registers are left out: every
+// key-on writes them.
+void DivPlatformPS1::toggleRegisterDump(bool enable) {
+  DivDispatch::toggleRegisterDump(enable);
+  if (!enable) return;
+  auto logReg=[this](unsigned int addr) {
+    addWrite(addr-0xc00,regPool[(addr-0xc00)>>1]);
+  };
+  for (unsigned int r: {PS1_PMON_LO,PS1_NON_LO,PS1_EON_LO}) {
+    logReg(r);
+    logReg(r+2);
+  }
+  logReg(PS1_MBASE);
+  for (int i=0; i<32; i++) logReg(PS1_REVERB_REGS+i*2);
+  logReg(PS1_EVOL_L);
+  logReg(PS1_EVOL_R);
+  logReg(PS1_SPUCNT);
+}
+
+unsigned int DivPlatformPS1::getSampleBase() {
+  return PS1_SAMPLE_BASE;
+}
+
+unsigned int DivPlatformPS1::getReverbBase() {
+  return reverbBase();
 }
 
 void DivPlatformPS1::voiceWrite(int ch, unsigned int reg, unsigned short val) {
@@ -326,6 +357,9 @@ void DivPlatformPS1::tick(bool sysTick) {
     }
     if (chan[i].volumeChanged) {
       int v=isMuted[i]?0:(chan[i].outVol*PS1_VOL_MAX)/127;
+      // fixed volume mode only: never let a negative level reach bit 15 (sweep mode).
+      if (v<0) v=0;
+      if (v>PS1_VOL_MAX) v=PS1_VOL_MAX;
       voiceWrite(i,PS1_VOL_L,(unsigned short)((v*chan[i].panL)/255));
       voiceWrite(i,PS1_VOL_R,(unsigned short)((v*chan[i].panR)/255));
       chan[i].volumeChanged=false;

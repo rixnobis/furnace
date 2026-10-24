@@ -546,6 +546,21 @@ void FurnaceGUI::drawExportROM(bool onWindow) {
       }
       break;
     }
+    case DIV_ROM_SPUDUMP: {
+      bool spdLoop=romConfig.getBool("loop",true);
+      bool spdClearReverb=romConfig.getBool("clearReverb",true);
+      if (ImGui::Checkbox(_("loop"),&spdLoop)) {
+        altered=true;
+      }
+      if (ImGui::Checkbox(_("clear reverb work area (in the sample bank)"),&spdClearReverb)) {
+        altered=true;
+      }
+      if (altered) {
+        romConfig.set("loop",spdLoop);
+        romConfig.set("clearReverb",spdClearReverb);
+      }
+      break;
+    }
     case DIV_ROM_GRUB: {
       bool grubExportBin=romConfig.getBool("exportBin",false);
       if (ImGui::Checkbox(_("export binary file"),&grubExportBin)) {
