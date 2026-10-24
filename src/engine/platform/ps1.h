@@ -109,6 +109,7 @@ class DivPlatformPS1: public DivDispatch {
     size_t getSampleMemCapacity(int index=0);
     size_t getSampleMemUsage(int index=0);
     bool isSampleLoaded(int index, int sample);
+    bool hasSamplePtrHeader(int index=0);
     const DivMemoryComposition* getMemCompo(int index);
     void renderSamples(int chipID);
     int init(DivEngine* parent, int channels, int sugRate, const DivConfig& flags);

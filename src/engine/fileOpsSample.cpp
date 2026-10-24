@@ -165,6 +165,36 @@ std::vector<DivSample*> DivEngine::sampleFromFile(const char* path) {
       return ret;
     }
 
+    if (extS==".vag") { // PlayStation VAG: SPU ADPCM blocks, kept as they are
+      DivSample* sample=new DivSample;
+      sample->name=stripPath;
+      FILE* f=ps_fopen(path,"rb");
+      if (f==NULL) {
+        BUSY_END;
+        lastError=fmt::sprintf("could not open file! (%s)",strerror(errno));
+        delete sample;
+        return ret;
+      }
+      std::vector<unsigned char> buf;
+      unsigned char chunk[4096];
+      size_t got;
+      while ((got=fread(chunk,1,4096,f))>0) {
+        buf.insert(buf.end(),chunk,chunk+got);
+        if (buf.size()>(size_t)64*1024*1024) break;
+      }
+      fclose(f);
+      String err;
+      if (!sample->loadVAG(buf.data(),buf.size(),err)) {
+        BUSY_END;
+        lastError=err;
+        delete sample;
+        return ret;
+      }
+      BUSY_END;
+      ret.push_back(sample);
+      return ret;
+    }
+
     if (extS==".dmc" || extS==".brr") { // read as .dmc or .brr
       size_t len=0;
       DivSample* sample=new DivSample;
@@ -539,6 +569,9 @@ DivSample* DivEngine::sampleFromFileRaw(const char* path, DivSampleDepth depth, 
     case DIV_SAMPLE_DEPTH_BRR:
       samples=16*((lenDivided+8)/9);
       break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      samples=28*((lenDivided+15)/16);
+      break;
     case DIV_SAMPLE_DEPTH_12BIT:
       samples=(2+(lenDivided*2))/3;
       break;
@@ -611,6 +644,8 @@ DivSample* DivEngine::sampleFromFileRaw(const char* path, DivSampleDepth depth, 
     memcpy(sample->getCurBuf(),buf,len);
   }
   delete[] buf;
+
+  if (depth==DIV_SAMPLE_DEPTH_SPU_ADPCM) sample->loopFromSPUFlags();
 
   if (swapNibbles) {
     unsigned char* b=(unsigned char*)sample->getCurBuf();

@@ -258,7 +258,7 @@ SafeWriter* DivEngine::saveText(bool separatePatterns) {
 
     w->writeText(fmt::sprintf("## %.2X: %s\n\n",i,sample->name));
 
-    w->writeText(fmt::sprintf("- format: %d\n",(int)sample->depth));
+    w->writeText(fmt::sprintf("- format: %d\n",(int)sampleDepthToFile(sample->depth)));
     w->writeText(fmt::sprintf("- data length: %d\n",sample->getCurBufLen()));
     w->writeText(fmt::sprintf("- samples: %d\n",sample->samples));
     w->writeText(fmt::sprintf("- rate: %d\n",sample->centerRate));

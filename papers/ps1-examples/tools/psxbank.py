@@ -98,7 +98,7 @@ def decode_vag(blob):
         shift = blk[0] & 15
         filt = min(blk[0] >> 4, 4)
         flags = blk[1]
-        if flags & 4 and loop_start is None:
+        if flags & 4:  # each start flag sets the repeat address: the last one wins
             loop_start = b * 28
         f0, f1 = FILT[filt]
         for i in range(28):

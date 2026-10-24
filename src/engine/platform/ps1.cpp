@@ -582,6 +582,12 @@ size_t DivPlatformPS1::getSampleMemUsage(int index) {
   return index==0?sampleMemLen:0;
 }
 
+// not a pointer header: the loop is in the uploaded blocks' flags, so a loop edit must
+// re-render the samples (this is what the sample editor asks before doing so).
+bool DivPlatformPS1::hasSamplePtrHeader(int index) {
+  return true;
+}
+
 bool DivPlatformPS1::isSampleLoaded(int index, int sample) {
   if (index!=0) return false;
   if (sample<0 || sample>32767) return false;
@@ -616,7 +622,10 @@ void DivPlatformPS1::renderSamples(int sysID) {
     DivSample* s=parent->song.sample[i];
     if (s->data16==NULL || s->samples==0) continue;
     if (!s->renderOn[0][sysID]) continue;
-    size_t need=PS1SPUBridge::encodedSize(s->samples);
+    // an SPU ADPCM sample is uploaded as stored (its loop flags included); a 16-bit one is encoded.
+    const bool native=(s->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM);
+    if (native && (s->dataSPU==NULL || s->lengthSPU<16)) continue;
+    size_t need=native?(size_t)(s->lengthSPU&~15U):PS1SPUBridge::encodedSize(s->samples);
     if (memPos+need>memTop) {
       if (memTop<PS1SPUBridge::RAM_SIZE) {
         logW("out of PS1 SPU memory for sample %d! (the reverb work area takes %d bytes)",i,(int)(PS1SPUBridge::RAM_SIZE-memTop));
@@ -630,8 +639,14 @@ void DivPlatformPS1::renderSamples(int sysID) {
       }
       break;
     }
-    int loopStart=s->isLoopable()?s->loopStart:-1;
-    size_t len=PS1SPUBridge::encodeADPCM(s->data16,s->samples,loopStart,s->loopEnd,sampleMem+memPos,memTop-memPos);
+    size_t len=0;
+    if (native) {
+      memcpy(sampleMem+memPos,s->dataSPU,need);
+      len=need;
+    } else {
+      int loopStart=s->isLoopable()?s->loopStart:-1;
+      len=PS1SPUBridge::encodeADPCM(s->data16,s->samples,loopStart,s->loopEnd,sampleMem+memPos,memTop-memPos);
+    }
     if (len==0) continue;
     sampleOff[i]=memPos;
     sampleLoaded[i]=true;

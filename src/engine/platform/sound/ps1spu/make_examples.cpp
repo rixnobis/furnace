@@ -1,12 +1,13 @@
 // Ours. Builds the PS1 example songs (papers/ps1-examples/) from the intermediate written by
 // papers/ps1-examples/tools/score2ps1.py, through DivEngine's own API (same approach as
 // make_corpus.cpp): one DIV_SYSTEM_PS1 chip, one engine tick per score tick, speed = score
-// ticks per row, one pattern per order then deduplicated per channel (key-offs between rows as FCxx delayed note release), samples as 16-bit PCM,
+// ticks per row, one pattern per order then deduplicated per channel (key-offs between rows as FCxx delayed note release), samples as SPU ADPCM
+// (the bank's blocks byte for byte, loop flags included),
 // PS1 instruments with the bank's ADSR words.
 // usage: ps1_examples <intermediate dir> <out.fur> [--reverb <preset>]
 //   --reverb: system flag "reverbPreset" (0 = off, 5 = Hall: what the PS1 player sets up, at
 //   output volume 0x3000 = the flags' default); instruments carry the score's CC91 send.
-//   <dir>/song.txt: song/sample/ins/cell lines (format in score2ps1.py), <dir>/sNN.raw: PCM
+//   <dir>/song.txt: song/sample/ins/cell lines (format in score2ps1.py), <dir>/sNN.adpcm: SPU ADPCM
 // regenerating both examples (from papers/ps1-examples/):
 //   python3 tools/score2ps1.py src/keynote.mid src/keynote.vab /tmp/k "One More Thing (keynote)"
 //   python3 tools/score2ps1.py src/forty-one-cycles.mid src/forty-one-cycles.vab /tmp/f "Forty-One Cycles" --names kitb
@@ -34,17 +35,24 @@ static String restOf(const char* line, int skipWords) {
   return s;
 }
 
-static bool loadPCM(const String& path, DivSample* s) {
+// the bank's ADPCM blocks, kept as they are; the loop comes from their flags.
+static bool loadADPCM(const String& path, DivSample* s) {
   FILE* f=fopen(path.c_str(),"rb");
   if (f==NULL) return false;
   fseek(f,0,SEEK_END);
-  long len=ftell(f)/2;
+  long len=ftell(f);
   fseek(f,0,SEEK_SET);
-  s->depth=DIV_SAMPLE_DEPTH_16BIT;
-  s->init(len);
-  size_t got=fread(s->data16,2,len,f);
+  if (len<16 || (len&15)) {
+    fclose(f);
+    return false;
+  }
+  s->depth=DIV_SAMPLE_DEPTH_SPU_ADPCM;
+  s->init(28*(len/16));
+  size_t got=fread(s->dataSPU,1,len,f);
   fclose(f);
-  return got==(size_t)len;
+  if (got!=(size_t)len || s->lengthSPU!=(unsigned int)len) return false;
+  s->loopFromSPUFlags();
+  return true;
 }
 
 static bool samePattern(DivPattern* a, DivPattern* b, int patLen) {
@@ -209,15 +217,16 @@ int main(int argc, char** argv) {
       s->name=restOf(line,5);
       s->centerRate=rate;
       char fn[32];
-      snprintf(fn,sizeof(fn),"/s%02d.raw",id);
-      if (!loadPCM(dir+fn,s) || s->samples!=(unsigned int)le) {
-        fprintf(stderr,"bad PCM for sample %d\n",id); return 1;
+      snprintf(fn,sizeof(fn),"/s%02d.adpcm",id);
+      if (!loadADPCM(dir+fn,s)) {
+        fprintf(stderr,"bad ADPCM for sample %d\n",id); return 1;
       }
-      if (ls>=0) {
-        s->loop=true;
-        s->loopStart=ls;
-        s->loopEnd=le;
-        s->loopMode=DIV_SAMPLE_LOOP_FORWARD;
+      // the loop read from the flags here must be the one score2ps1 read from them
+      bool fl=false;
+      int fs=0, fe=0;
+      s->getSPULoop(fl,fs,fe);
+      if (fl!=(ls>=0) || (fl && fs!=ls) || fe!=le) {
+        fprintf(stderr,"sample %d: loop from the block flags (%d %d..%d) != score2ps1's (%d..%d)\n",id,(int)fl,fs,fe,ls,le); return 1;
       }
       e.addSamplePtr(s);
     } else if (strcmp(kind,"ins")==0) {

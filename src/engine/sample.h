@@ -50,8 +50,21 @@ enum DivSampleDepth: unsigned char {
   DIV_SAMPLE_DEPTH_12BIT=14,
   DIV_SAMPLE_DEPTH_4BIT=15,
   DIV_SAMPLE_DEPTH_16BIT=16,
+  // fork-owned (PS1): in memory only. on disk it is DIV_SAMPLE_DEPTH_FILE_SPU_ADPCM; always go
+  // through sampleDepthToFile()/sampleDepthFromFile() when (de)serializing a depth.
+  DIV_SAMPLE_DEPTH_SPU_ADPCM,
   DIV_SAMPLE_DEPTH_MAX // boundary for sample depth
 };
+
+// on-disk id of DIV_SAMPLE_DEPTH_SPU_ADPCM: fork-owned, far outside upstream's range (0..16).
+#define DIV_SAMPLE_DEPTH_FILE_SPU_ADPCM 0xe1
+
+// an on-disk depth equal to a fork-owned in-memory value is a newer upstream depth: it loads
+// as this (unknown) in-memory value, so it is never mistaken for ours, and is written back as is.
+#define DIV_SAMPLE_DEPTH_FILE_FOREIGN ((DivSampleDepth)DIV_SAMPLE_DEPTH_FILE_SPU_ADPCM)
+
+unsigned char sampleDepthToFile(DivSampleDepth d);
+DivSampleDepth sampleDepthFromFile(unsigned char v);
 
 enum DivResampleFilters {
   DIV_RESAMPLE_NONE=0,
@@ -121,6 +134,7 @@ struct DivSample {
   // - 13: IMA ADPCM
   // - 14: 12-bit PCM (MultiPCM)
   // - 16: 16-bit PCM
+  // - 17: SPU ADPCM (PS1; fork-owned, 0xE1 on disk)
   DivSampleDepth depth;
   bool loop, brrEmphasis, brrNoFilter, dither;
   // valid values are:
@@ -148,8 +162,9 @@ struct DivSample {
   unsigned char* dataIMA; // 13
   unsigned char* data12; // 14
   unsigned char* data4; // 15
+  unsigned char* dataSPU; // 17 (16 bytes per 28 samples, loop flags in the block headers)
 
-  unsigned int length8, length16, length1, lengthDPCM, lengthZ, lengthQSoundA, lengthA, lengthB, lengthK, lengthBRR, lengthVOX, lengthMuLaw, lengthC219, lengthIMA, length12, length4;
+  unsigned int length8, length16, length1, lengthDPCM, lengthZ, lengthQSoundA, lengthA, lengthB, lengthK, lengthBRR, lengthVOX, lengthMuLaw, lengthC219, lengthIMA, length12, length4, lengthSPU;
 
   unsigned int samples;
 
@@ -175,6 +190,53 @@ struct DivSample {
    * @return whether it is loopable.
    */
   bool isLoopable();
+
+  /**
+   * SPU ADPCM: read the loop the block flags in dataSPU describe, as the SPU plays it: the
+   * first block with the end flag (bit 0) ends the sample; it loops if that block also has
+   * the repeat flag (bit 1), from the last block with the start flag (bit 2) up to it (each start
+   * flag sets the repeat address), else from block 0.
+   * @param loopOut whether it loops.
+   * @param startOut loop start in samples (multiple of 28), 0 if it does not loop.
+   * @param endOut end of the played part (loop end or one-shot end) in samples (multiple of
+   * 28); the whole data if no block has the end flag.
+   * @return whether any block has the end flag.
+   */
+  bool getSPULoop(bool& loopOut, int& startOut, int& endOut);
+
+  /**
+   * SPU ADPCM: make the block flags in dataSPU agree with loop/loopStart/loopEnd (rounded to
+   * 28-sample blocks). does nothing (bytes untouched) when they already agree.
+   * @return whether any byte changed.
+   */
+  bool syncSPULoopFlags();
+
+  /**
+   * SPU ADPCM / PS1: nearest multiple of 28 to pos that is not past the end of the sample.
+   */
+  int spuAlignHint(int pos);
+
+  /**
+   * save sample as a PlayStation VAG file (SPU ADPCM samples only).
+   * @param path the path.
+   * @return whether it did.
+   */
+  bool saveVAG(const char* path);
+
+  /**
+   * load a PlayStation VAG file image as an SPU ADPCM sample: the blocks are kept as they are,
+   * the rate and name come from the header, the loop from the block flags.
+   * @param buf the file contents.
+   * @param len its length.
+   * @param err set to the reason on failure.
+   * @return whether it did.
+   */
+  bool loadVAG(const unsigned char* buf, size_t len, String& err);
+
+  /**
+   * set loop/loopStart/loopEnd from the loop the SPU ADPCM block flags describe.
+   */
+  void loopFromSPUFlags();
 
   /**
    * get sample start position
@@ -362,6 +424,7 @@ struct DivSample {
     dataIMA(NULL),
     data12(NULL),
     data4(NULL),
+    dataSPU(NULL),
     length8(0),
     length16(0),
     length1(0),
@@ -378,6 +441,7 @@ struct DivSample {
     lengthIMA(0),
     length12(0),
     length4(0),
+    lengthSPU(0),
     samples(0) {
     for (int i=0; i<DIV_MAX_CHIPS; i++) {
       for (int j=0; j<DIV_MAX_SAMPLE_TYPE; j++) {

@@ -3,7 +3,8 @@
 # PS1 version plays (VAB) into a plain intermediate that the ps1_examples target turns into
 # a .fur:
 #   <out>/song.txt   - song/sample/instrument/cell lines (format below)
-#   <out>/sNN.raw    - 16-bit little-endian mono PCM per sample, decoded from the bank's ADPCM
+#   <out>/sNN.adpcm  - the sample's SPU ADPCM blocks, byte for byte as in the bank (loop flags
+#                      included); the .fur keeps them as SPU ADPCM samples, uploaded as they are
 #
 # The mapping follows the PS1 player (nugget psmplayer) note for note:
 #   - engine tick = MIDI tick: rate = PPQ * bpm / 60 Hz. rows are a grid of ticks: a quarter
@@ -21,7 +22,8 @@
 #
 # song.txt lines:
 #   song <hz> <patLen> <rows> <speed> <lastRowSpeed> <rowsPerBeat> <title>
-#   sample <id> <c4rate> <loopStart|-1> <loopEnd> <name>
+#   sample <id> <c4rate> <loopStart|-1> <end> <name>   (loop/end as the block flags play it:
+#        loop end, or where a one-shot stops; the .adpcm may hold blocks past it)
 #   ins <id> <sample> <adsr1 hex> <adsr2 hex> <reverb 0/1> <name>
 #   cell <ch> <row> <note|off> <ins> <vol> <panL> <panR> <delay>   (panL/panR -1 = unchanged;
 #        delay = ticks into the row, key-offs only: 0 = OFF cell, >0 = FCxx effect)
@@ -172,13 +174,13 @@ def main():
         t = tones[(vp, k)]
         skey = (t['vag'], t['center'], t['shift'])
         if skey not in samples:
-            pcm, ls, end = P.decode_vag(bank['vags'][t['vag']])
-            pcm = pcm[:end]
+            blob = bank['vags'][t['vag']]
+            _, ls, end = P.decode_vag(blob)
             c4 = 44100.0 * 2 ** ((60 - t['center']) / 12.0) * (65536 + t['shift'] * 38) / 65536.0
             sid = len(sinfo)
             samples[skey] = sid
-            open(os.path.join(out, 's%02d.raw' % sid), 'wb').write(struct.pack('<%dh' % len(pcm), *pcm))
-            sinfo.append((sid, int(round(c4)), -1 if ls is None else ls, len(pcm), tone_name(vp, k)))
+            open(os.path.join(out, 's%02d.adpcm' % sid), 'wb').write(blob)
+            sinfo.append((sid, int(round(c4)), -1 if ls is None else ls, end, tone_name(vp, k)))
         sid = samples[skey]
         ikey = (sid, t['adsr1'], t['adsr2'], rev)
         if ikey not in insts:
