@@ -1,7 +1,7 @@
 // Ours. Headless positive/negative control for DivPlatformPS1.
 // Instantiates the platform directly with a bare DivEngine (never init()ed) as parent,
 // holding one 44100 Hz 1 kHz sine sample and one Amiga-type instrument.
-// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan|reverb|noise|pmod> <out.wav>
+// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan|reverb|noise|pmod|rvbregs> <out.wav>
 //   on/off: one instance, note on / no note, 0.5 s
 //   two:    instances A (note on) and B (no note) rendered alternately, tick by tick, 0.5 s
 //   time:   one instance, note on, 10 s, prints the wall time of the render loop
@@ -11,10 +11,13 @@
 //   reverb: 10 ms burst with reverb off/presets: tail RMS after the dry end, tail length
 //   noise:  NON on/off: spectral flatness/centroid, centroid vs noise clock (1Dxx)
 //   pmod:   voice 0 5 Hz sine modulating voice 1 1 kHz (PMON): frequency range
+//   rvbregs <song.fur> [out.fur]: reverb register flags: derived work area per preset,
+//           .fur round trip of custom registers, overflow warnings
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <vector>
 #include "../../../engine.h"
 #include "../../ps1.h"
@@ -463,9 +466,189 @@ static int pmodArm(DivEngine& e) {
   return ok?0:1;
 }
 
+// ---- reverb register flags arm ----
+
+static void setRegs(DivConfig& f, const unsigned short* regs) {
+  for (int i=0; i<32; i++) f.set(String("rvb_")+DivPlatformPS1::reverbRegName(i),(int)regs[i]);
+}
+
+// tail RMS (L, 200-500 ms after the dry end) of the 10 ms burst through the given flags;
+// optionally the instance's warnings and dropped-sample count after renderSamples.
+static double burstTail(DivEngine& e, const DivConfig& f, int ins, size_t dryEnd, std::vector<short>& L, std::vector<short>& R, int* warn=NULL, int* dropped=NULL) {
+  const int rate=44100;
+  const size_t tickLen=rate/60, total=rate*3;
+  L.assign(total,0); R.assign(total,0);
+  DivPlatformPS1 p;
+  p.init(&e,24,rate,f);
+  p.renderSamples(0);
+  if (warn) *warn=p.reverbWarnings();
+  if (dropped) *dropped=p.reverbSamplesDropped();
+  p.dispatch(DivCommand(DIV_CMD_INSTRUMENT,0,ins));
+  p.dispatch(DivCommand(DIV_CMD_NOTE_ON,0,108));
+  for (size_t pos=0; pos<total; pos+=tickLen) {
+    p.tick(true);
+    size_t n=std::min(tickLen,total-pos);
+    short* bufs[2]={&L[pos],&R[pos]};
+    p.acquire(bufs,n);
+  }
+  p.quit();
+  return rmsOf(L,dryEnd+rate/5,rate*3/10);
+}
+
+// usage: ps1spu_test rvbregs <song.fur> <out-custom.fur>
+static int rvbRegsArm(const char* songPath, const char* outPath) {
+  bool ok=true;
+  // 1. derived work area size per preset vs psx-spx's listed size
+  printf("derived work area (bytes) vs psx-spx table:\n");
+  for (int p=1; p<DivPlatformPS1::REVERB_PRESETS; p++) {
+    unsigned short r[32];
+    int maxReg=10;
+    for (int i=0; i<32; i++) r[i]=DivPlatformPS1::reverbPresetReg(p,i);
+    for (int i=10; i<30; i++) if (r[i]>r[maxReg]) maxReg=i;
+    unsigned int need=DivPlatformPS1::reverbRequired(r), tab=DivPlatformPS1::reverbSize(p);
+    printf("  %-13s derived %05X  table %05X  table-derived %+6d  (largest address %s=%04X -> %05X)\n",
+      DivPlatformPS1::reverbPresetName(p),need,tab,(int)tab-(int)need,DivPlatformPS1::reverbRegName(maxReg),r[maxReg],r[maxReg]*8);
+    if (need>tab) ok=false;
+  }
+
+  DivEngine e;
+  e.preInit(true);
+  e.setAudio(DIV_AUDIO_DUMMY);
+  if (!e.init()) return 1;
+  // burst sample/instrument for the tail measurements (separate song state is fine: the
+  // platform instances below read e.song only for samples/instruments).
+  auto loadFile=[&](const unsigned char* data, size_t len, const char* name) {
+    unsigned char* b=new unsigned char[len];
+    memcpy(b,data,len);
+    return e.load(b,len,name);
+  };
+  FILE* f=fopen(songPath,"rb");
+  if (!f) { printf("cannot open %s\n",songPath); return 1; }
+  fseek(f,0,SEEK_END);
+  size_t len=ftell(f);
+  fseek(f,0,SEEK_SET);
+  std::vector<unsigned char> file(len);
+  if (fread(file.data(),1,len,f)!=len) return 1;
+  fclose(f);
+  if (!loadFile(file.data(),len,songPath)) { printf("load failed\n"); return 1; }
+  printf("loaded %s: flags have rvb_ keys: %s, reverbPreset=%d\n",songPath,
+    e.song.systemFlags[0].has("rvb_vIIR")?"yes":"no",e.song.systemFlags[0].getInt("reverbPreset",-1));
+
+  // 2. round trip: Hall with vIIR and mLSAME changed, saved through saveFur and reloaded.
+  unsigned short hall[32], cust[32];
+  for (int i=0; i<32; i++) hall[i]=cust[i]=DivPlatformPS1::reverbPresetReg(5,i);
+  cust[2]=0x3000;  // vIIR 6000h -> 3000h
+  cust[10]=0x1000; // mLSAME 15BAh -> 1000h
+  DivConfig custom=e.song.systemFlags[0];
+  custom.set("reverbPreset",DivPlatformPS1::REVERB_CUSTOM);
+  setRegs(custom,cust);
+  custom.set("rvb_mBASE",(int)((PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbRequired(cust))>>3));
+  e.song.systemFlags[0]=custom;
+  SafeWriter* w=e.saveFur();
+  if (w==NULL) { printf("saveFur failed\n"); return 1; }
+  std::vector<unsigned char> saved(w->getFinalBuf(),w->getFinalBuf()+w->size());
+  w->finish();
+  delete w;
+  if (outPath) {
+    FILE* o=fopen(outPath,"wb");
+    if (o) { fwrite(saved.data(),1,saved.size(),o); fclose(o); }
+  }
+  if (!loadFile(saved.data(),saved.size(),"custom.fur")) { printf("reload failed\n"); return 1; }
+  // a copy: createNew below resets e.song.
+  const DivConfig back=e.song.systemFlags[0];
+  int same=0;
+  for (int i=0; i<32; i++) {
+    String k=String("rvb_")+DivPlatformPS1::reverbRegName(i);
+    if (back.has(k) && back.getInt(k,-1)==(int)cust[i]) same++;
+  }
+  bool baseSame=back.getInt("rvb_mBASE",-1)==custom.getInt("rvb_mBASE",-2);
+  bool presetSame=back.getInt("reverbPreset",-1)==DivPlatformPS1::REVERB_CUSTOM;
+  DivPlatformPS1::ReverbSetup rsC;
+  DivPlatformPS1::reverbResolve(back,rsC);
+  printf("round trip (%u-byte .fur): %d/32 register flags equal, mBASE %s (%04X), reverbPreset %s (%d); resolved base %05X needs %u bytes, warn %d\n",
+    (unsigned)saved.size(),same,baseSame?"equal":"DIFFERS",back.getInt("rvb_mBASE",-1),presetSame?"equal":"DIFFERS",back.getInt("reverbPreset",-1),rsC.base,rsC.required,rsC.warn);
+  if (same!=32 || !baseSame || !presetSame || rsC.warn) ok=false;
+
+  // tail renders: Hall (preset only) vs the reloaded custom flags, same burst.
+  e.createNew("id0=225\n","Sony PlayStation",false);
+  const int rate=44100;
+  DivSample* b=newSample(441,rate);
+  unsigned int lcg=1;
+  for (int i=0; i<441; i++) {
+    lcg=lcg*1103515245+12345;
+    b->data16[i]=(short)((((int)((lcg>>16)&0x7fff))-16384)*(441-i)/441);
+  }
+  int sb=addSample(e,b);
+  int ins=addPS1Ins(e,sb,true,false,false);
+  std::vector<short> L, R, L2, R2;
+  DivConfig fOff;
+  burstTail(e,fOff,ins,0,L,R);
+  size_t dryEnd=lastNonZero(L,R);
+  DivConfig fHall;
+  fHall.set("reverbPreset",5);
+  double tHall=burstTail(e,fHall,ins,dryEnd,L,R);
+  double tCust=burstTail(e,back,ins,dryEnd,L2,R2);
+  printf("tail RMS 200-500 ms: Hall %.2f, custom (vIIR 3000h, mLSAME 1000h, reloaded) %.2f\n",tHall,tCust);
+  if (tHall==tCust || L==L2) ok=false;
+  // Hall written out as explicit register flags + table base: must equal the preset-only render.
+  DivConfig fHallX;
+  fHallX.set("reverbPreset",5);
+  setRegs(fHallX,hall);
+  fHallX.set("rvb_mBASE",(int)((PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbSize(5))>>3));
+  burstTail(e,fHallX,ins,dryEnd,L2,R2);
+  bool eqX=(L==L2 && R==R2);
+  printf("Hall as explicit register flags + table base vs preset only: %s\n",eqX?"bit-identical":"DIFFERENT");
+  if (!eqX) ok=false;
+  // informational: Hall at the derived (smaller) base instead of the table one.
+  fHallX.set("rvb_mBASE",(int)((PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbRequired(hall))>>3));
+  burstTail(e,fHallX,ins,dryEnd,L2,R2);
+  printf("Hall at derived base %05X vs table base %05X: %s\n",PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbRequired(hall),
+    PS1SPUBridge::RAM_SIZE-DivPlatformPS1::reverbSize(5),(L==L2 && R==R2)?"bit-identical":"different");
+
+  // 3. overflow: a 300000-frame sample (about 171 KB of ADPCM) plus mLSAME=F000h (needs
+  // about 480 KB): the area cannot sit above the samples.
+  DivSample* big=newSample(300000,rate);
+  for (int i=0; i<300000; i++) big->data16[i]=(short)(8000*sin(2*M_PI*440.0*i/rate));
+  addSample(e,big);
+  unsigned short over[32];
+  memcpy(over,hall,sizeof(over));
+  over[10]=0xF000;
+  struct { const char* what; int base; } cases[]={
+    {"mLSAME=F000h, base derived",-1},
+    {"Hall regs, mBASE=FFF0h (past the end)",-2},
+    {"Hall regs, mBASE=0010h (inside capture buffers)",0x10},
+    {"mLSAME=FFFFh (more than all of SPU RAM)",-3},
+  };
+  for (auto& c: cases) {
+    DivConfig fo;
+    fo.set("reverbPreset",DivPlatformPS1::REVERB_CUSTOM);
+    if (c.base==-3) {
+      unsigned short huge[32];
+      memcpy(huge,hall,sizeof(huge));
+      huge[10]=0xffff;
+      setRegs(fo,huge);
+    } else {
+      setRegs(fo,(c.base==-1)?over:hall);
+    }
+    if (c.base==-2) fo.set("rvb_mBASE",0xfff0);
+    else if (c.base>=0) fo.set("rvb_mBASE",c.base);
+    DivPlatformPS1::ReverbSetup rs;
+    DivPlatformPS1::reverbResolve(fo,rs);
+    int warn=0, dropped=0;
+    double t=burstTail(e,fo,ins,dryEnd,L2,R2,&warn,&dropped);
+    printf("overflow %-48s: needs %06X, base %05X, warn %d%s%s%s, samples dropped %d, tail RMS %.2f\n",c.what,rs.required,rs.base,warn,
+      (warn&DivPlatformPS1::REVERB_WARN_CLAMPED)?" CLAMPED":"",(warn&DivPlatformPS1::REVERB_WARN_LOW)?" LOW":"",(warn&DivPlatformPS1::REVERB_WARN_ALIAS)?" ALIAS":"",dropped,t);
+    if (warn==0 && dropped==0) ok=false;
+  }
+  printf("rvbregs arm: %s\n",ok?"OK":"FAIL");
+  fflush(stdout);
+  _exit(ok?0:1);
+}
+
 int main(int argc, char** argv) {
   const char* mode=argc>1?argv[1]:"on";
   if (strcmp(mode,"fmt")==0) return fmtArm();
+  if (strcmp(mode,"rvbregs")==0) return rvbRegsArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur",argc>3?argv[3]:NULL);
   if (strcmp(mode,"reverb")==0 || strcmp(mode,"noise")==0 || strcmp(mode,"pmod")==0) {
     DivEngine e;
     if (strcmp(mode,"reverb")==0) return reverbArm(e);
