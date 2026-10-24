@@ -133,6 +133,22 @@ void FurnaceGUI::drawSampleWarning(DivSample* sample, int index, String &warnLoo
         MAX_RATE("SNES",dispatch->chipClock/8.0);
       }
       break;
+    case DIV_SYSTEM_PS1:
+      // SPU ADPCM blocks are 28 samples: the loop flags sit on block boundaries
+      if (sample->loop) {
+        if (sample->loopStart%28) {
+          String alignHint=fmt::sprintf(_("PS1: loop start must be a multiple of 28 (try with %d)"),sample->spuAlignHint(sample->loopStart));
+          SAMPLE_WARN(warnLoopStart,alignHint);
+        }
+        if (sample->loopEnd%28) {
+          String alignHint=fmt::sprintf(_("PS1: loop end must be a multiple of 28 (try with %d)"),sample->spuAlignHint(sample->loopEnd));
+          SAMPLE_WARN(warnLoopEnd,alignHint);
+        }
+      }
+      if (sample->samples%28) {
+        SAMPLE_WARN(warnLength,_("PS1: sample length will be padded to multiple of 28"));
+      }
+      break;
     case DIV_SYSTEM_QSOUND:
       if (sample->loop) {
         if (sample->depth==DIV_SAMPLE_DEPTH_QSOUND_ADPCM) {
@@ -690,9 +706,12 @@ void FurnaceGUI::drawSampleEdit() {
           REFRESH_SAMPLE
         }
         popWarningColor();
-        if (ImGui::IsItemHovered() && (!warnLoop.empty() || sample->depth==DIV_SAMPLE_DEPTH_BRR)) {
+        if (ImGui::IsItemHovered() && (!warnLoop.empty() || sample->depth==DIV_SAMPLE_DEPTH_BRR || sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM)) {
           if (sample->depth==DIV_SAMPLE_DEPTH_BRR) {
             SAMPLE_WARN(warnLoop,_("changing the loop in a BRR sample may result in glitches!"));
+          }
+          if (sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM) {
+            SAMPLE_WARN(warnLoop,_("changing the loop in an SPU ADPCM sample rewrites its block loop flags (28-sample blocks) and may result in glitches!"));
           }
           ImGui::SetTooltip("%s",warnLoop.c_str());
         }
@@ -936,10 +955,13 @@ void FurnaceGUI::drawSampleEdit() {
           if (ImGui::IsItemHovered()) {
             displayLoopStartHints=true;
           }
-          if (ImGui::IsItemHovered() && (!warnLoopPos.empty() || (!warnLoopStart.empty() && sampleCheckLoopStart) || sample->depth==DIV_SAMPLE_DEPTH_BRR)) {
+          if (ImGui::IsItemHovered() && (!warnLoopPos.empty() || (!warnLoopStart.empty() && sampleCheckLoopStart) || sample->depth==DIV_SAMPLE_DEPTH_BRR || sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM)) {
             if (ImGui::BeginTooltip()) {
               if (sample->depth==DIV_SAMPLE_DEPTH_BRR) {
                 ImGui::Text(_("changing the loop in a BRR sample may result in glitches!"));
+              }
+              if (sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM) {
+                ImGui::Text(_("changing the loop in an SPU ADPCM sample rewrites its block loop flags (28-sample blocks) and may result in glitches!"));
               }
               if (!warnLoopStart.empty()) {
                 ImGui::Text("%s",warnLoopStart.c_str());
@@ -978,10 +1000,13 @@ void FurnaceGUI::drawSampleEdit() {
           if (ImGui::IsItemHovered()) {
             displayLoopEndHints=true;
           }
-          if (ImGui::IsItemHovered() && (!warnLoopPos.empty() || (!warnLoopEnd.empty() && sampleCheckLoopEnd) || sample->depth==DIV_SAMPLE_DEPTH_BRR)) {
+          if (ImGui::IsItemHovered() && (!warnLoopPos.empty() || (!warnLoopEnd.empty() && sampleCheckLoopEnd) || sample->depth==DIV_SAMPLE_DEPTH_BRR || sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM)) {
             if (ImGui::BeginTooltip()) {
               if (sample->depth==DIV_SAMPLE_DEPTH_BRR) {
                 ImGui::Text(_("changing the loop in a BRR sample may result in glitches!"));
+              }
+              if (sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM) {
+                ImGui::Text(_("changing the loop in an SPU ADPCM sample rewrites its block loop flags (28-sample blocks) and may result in glitches!"));
               }
               if (!warnLoopEnd.empty()) {
                 ImGui::Text("%s",warnLoopEnd.c_str());
@@ -2309,6 +2334,7 @@ void FurnaceGUI::drawSampleEdit() {
         bool displayLoopHintsNDS8=false;
         bool displayLoopHintsAmiga=false;
         bool displayLoopHintsGBADMA=false;
+        bool displayLoopHintsPS1=(sample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM);
 
         for (int i=0; i<e->song.systemLen; i++) {
           if (e->song.system[i]==DIV_SYSTEM_NES) {
@@ -2332,9 +2358,25 @@ void FurnaceGUI::drawSampleEdit() {
           if (e->song.system[i]==DIV_SYSTEM_GBA_DMA) {
             displayLoopHintsGBADMA=true;
           }
+          if (e->song.system[i]==DIV_SYSTEM_PS1) {
+            displayLoopHintsPS1=true;
+          }
         }
 
         if (displayLoopStartHints) {
+          if (displayLoopHintsPS1) {
+            if (sampleZoom<1.25) {
+              for (int i=0; i<(int)(sampleZoom*avail.x); i++) {
+                if (((i+samplePos)%28)==0) {
+                  ImVec2 p1=ImVec2(rectMin.x+((float)i/sampleZoom),rectMin.y);
+                  ImVec2 p2=p1;
+                  p2.y=rectMax.y;
+
+                  dl->AddLine(p1,p2,ImGui::GetColorU32(uiColors[GUI_COLOR_SAMPLE_LOOP_HINT]));
+                }
+              }
+            }
+          }
           if (displayLoopHintsNES) {
             if (sampleZoom<3.0) {
               for (int i=0; i<(int)(sampleZoom*avail.x); i++) {
@@ -2416,6 +2458,19 @@ void FurnaceGUI::drawSampleEdit() {
         }
 
         if (displayLoopEndHints) {
+          if (displayLoopHintsPS1) {
+            if (sampleZoom<1.25) {
+              for (int i=0; i<(int)(sampleZoom*avail.x); i++) {
+                if (((i+samplePos)%28)==0) {
+                  ImVec2 p1=ImVec2(rectMin.x+((float)i/sampleZoom),rectMin.y);
+                  ImVec2 p2=p1;
+                  p2.y=rectMax.y;
+
+                  dl->AddLine(p1,p2,ImGui::GetColorU32(uiColors[GUI_COLOR_SAMPLE_LOOP_HINT]));
+                }
+              }
+            }
+          }
           if (displayLoopHintsNES) {
             if (sampleZoom<3.0) {
               for (int i=0; i<(int)(sampleZoom*avail.x); i++) {

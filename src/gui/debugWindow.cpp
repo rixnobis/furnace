@@ -590,6 +590,7 @@ void FurnaceGUI::drawDebug() {
           ImGui::Text("lengthA: %d",sample->lengthA);
           ImGui::Text("lengthB: %d",sample->lengthB);
           ImGui::Text("lengthBRR: %d",sample->lengthBRR);
+          ImGui::Text("lengthSPU: %d",sample->lengthSPU);
           ImGui::Text("lengthVOX: %d",sample->lengthVOX);
 
           ImGui::Text("samples: %d",sample->samples);

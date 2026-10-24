@@ -2424,7 +2424,9 @@ void FurnaceGUI::openFileDialog(FurnaceGUIFileDialogs type) {
       if (!dirExists(workingDirSample)) workingDirSample=getHomeDir();
       hasOpened=fileDialog->openSave(
         _("Save Raw Sample"),
-        {_("all files"), "*"},
+        (e->getSample(curSample)->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM)?
+          std::vector<String>({_("PlayStation VAG"), "*.vag", _("all files"), "*"}):
+          std::vector<String>({_("all files"), "*"}),
         workingDirSample,
         dpiScale,
         (settings.autoFillSave)?e->getSample(curSample)->name:""
@@ -6533,7 +6535,12 @@ bool FurnaceGUI::loop() {
               break;
             case GUI_FILE_SAMPLE_SAVE_RAW:
               if (curSample>=0 && curSample<(int)e->song.sample.size()) {
-                if (!e->song.sample[curSample]->saveRaw(copyOfName.c_str())) {
+                DivSample* rawSample=e->song.sample[curSample];
+                // an SPU ADPCM sample saved as .vag gets the VAG header; otherwise raw data
+                String rawExt=(copyOfName.size()>=4)?copyOfName.substr(copyOfName.size()-4):String();
+                for (char& c: rawExt) if (c>='A' && c<='Z') c+='a'-'A';
+                bool asVAG=rawSample->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM && rawExt==".vag";
+                if (!(asVAG?rawSample->saveVAG(copyOfName.c_str()):rawSample->saveRaw(copyOfName.c_str()))) {
                   showError(_("could not save sample! open Log Viewer for more information."));
                 } else {
                   pushRecentSys(copyOfName.c_str());
@@ -9133,6 +9140,7 @@ bool FurnaceGUI::init() {
     // just in case
     if (strcmp(f.extension,"dmc")==0) continue;
     if (strcmp(f.extension,"brr")==0) continue;
+    if (strcmp(f.extension,"vag")==0) continue;
 
     // special treatment for Ogg and MPEG
     if (strcmp(f.extension,"oga")==0) {
@@ -9155,6 +9163,7 @@ bool FurnaceGUI::init() {
 
   compatFormats+="*.dmc ";
   compatFormats+="*.brr ";
+  compatFormats+="*.vag ";
 
   compatFormats+="*.ppc ";
   compatFormats+="*.pps ";
@@ -9170,6 +9179,9 @@ bool FurnaceGUI::init() {
 
   audioLoadFormats.push_back(_("SNES Bit Rate Reduction"));
   audioLoadFormats.push_back("*.brr");
+
+  audioLoadFormats.push_back(_("PlayStation VAG (SPU ADPCM)"));
+  audioLoadFormats.push_back("*.vag");
 
   audioLoadFormats.push_back(_("PMD YM2608 ADPCM-B sample bank"));
   audioLoadFormats.push_back("*.ppc");

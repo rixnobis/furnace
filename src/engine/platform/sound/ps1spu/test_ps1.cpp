@@ -1,7 +1,7 @@
 // Ours. Headless positive/negative control for DivPlatformPS1.
 // Instantiates the platform directly with a bare DivEngine (never init()ed) as parent,
 // holding one 44100 Hz 1 kHz sine sample and one Amiga-type instrument.
-// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan|reverb|noise|pmod|rvbregs> <out.wav>
+// usage: ps1spu_test <on|off|two|time|fmt|adsr|pan|reverb|noise|pmod|rvbregs|spu|upload> <out.wav>
 //   on/off: one instance, note on / no note, 0.5 s
 //   two:    instances A (note on) and B (no note) rendered alternately, tick by tick, 0.5 s
 //   time:   one instance, note on, 10 s, prints the wall time of the render loop
@@ -13,6 +13,9 @@
 //   pmod:   voice 0 5 Hz sine modulating voice 1 1 kHz (PMON): frequency range
 //   rvbregs <song.fur> [out.fur]: reverb register flags: derived work area per preset,
 //           .fur round trip of custom registers, overflow warnings
+//   spu [tmpdir] [other.vag]: SPU ADPCM sample depth: on-disk id 0xE1 and foreign guard,
+//           conversion, loop flags, VAG round trip, PS1 loop hint, upload as stored
+//   upload <song.fur> <bank.vab>: uploaded SPU RAM bytes of each sample vs the VAB bodies
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -645,8 +648,226 @@ static int rvbRegsArm(const char* songPath, const char* outPath) {
   _exit(ok?0:1);
 }
 
+// ---- SPU ADPCM sample depth ----
+
+static bool fileBytes(const char* path, std::vector<unsigned char>& out) {
+  FILE* f=fopen(path,"rb");
+  if (!f) return false;
+  fseek(f,0,SEEK_END);
+  long len=ftell(f);
+  fseek(f,0,SEEK_SET);
+  out.resize(len);
+  bool ok=fread(out.data(),1,len,f)==(size_t)len;
+  fclose(f);
+  return ok;
+}
+
+static bool sameSPU(DivSample* a, DivSample* b) {
+  return a->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM && b->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM &&
+    a->lengthSPU==b->lengthSPU && a->samples==b->samples && memcmp(a->dataSPU,b->dataSPU,a->lengthSPU)==0;
+}
+
+// spu [tmpdir] [other.vag]: depth id mapping, conversion, .fur sample block round trip with
+// the foreign-depth guard, loop flag sync, VAG round trip (and an external VAG), the PS1 loop
+// hint, and the platform uploading an SPU ADPCM sample as stored.
+static int spuArm(const char* tmpDir, const char* extVag) {
+  bool ok=true;
+  auto check=[&](const char* what, bool c) {
+    printf("  %-72s %s\n",what,c?"OK":"FAIL");
+    if (!c) ok=false;
+  };
+  printf("depth ids: in-memory SPU_ADPCM=%d, on disk 0x%02X\n",(int)DIV_SAMPLE_DEPTH_SPU_ADPCM,sampleDepthToFile(DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  check("SPU_ADPCM <-> 0xE1",sampleDepthToFile(DIV_SAMPLE_DEPTH_SPU_ADPCM)==0xe1 && sampleDepthFromFile(0xe1)==DIV_SAMPLE_DEPTH_SPU_ADPCM);
+  check("upstream depths pass through (0..16)",[]() {
+    for (int i=0; i<=16; i++) if (sampleDepthToFile((DivSampleDepth)i)!=i || sampleDepthFromFile(i)!=(DivSampleDepth)i) return false;
+    return true;
+  }());
+  check("raw 17 (future upstream) is not SPU ADPCM, written back as 17",
+    sampleDepthFromFile(17)!=DIV_SAMPLE_DEPTH_SPU_ADPCM && sampleDepthToFile(sampleDepthFromFile(17))==17);
+
+  // conversion from 16-bit: same bytes as the platform's own encoding
+  const int len=1500, ls=280, le=1400;
+  DivSample* s=newSample(len,44100);
+  s->name="spu sine";
+  for (int i=0; i<len; i++) s->data16[i]=(short)round(12000.0*sin(2.0*M_PI*441.0*i/44100.0));
+  s->loop=true; s->loopStart=ls; s->loopEnd=le;
+  std::vector<unsigned char> ref(PS1SPUBridge::encodedSize(len));
+  size_t refLen=PS1SPUBridge::encodeADPCM(s->data16,len,ls,le,ref.data(),ref.size());
+  s->convert(DIV_SAMPLE_DEPTH_SPU_ADPCM,(1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  printf("16-bit %d samples, loop %d..%d -> SPU ADPCM %u bytes, %u samples, loop %d..%d\n",len,ls,le,s->lengthSPU,s->samples,s->loopStart,s->loopEnd);
+  check("converted bytes == PS1SPUBridge::encodeADPCM",s->lengthSPU==refLen && memcmp(s->dataSPU,ref.data(),refLen)==0);
+  bool fl; int fs, fe;
+  s->getSPULoop(fl,fs,fe);
+  check("block flags describe loop 280..1400 (blocks 10..49)",fl && fs==280 && fe==1400);
+
+  // .fur sample block (SMP2) round trip
+  SafeWriter w;
+  w.init();
+  s->putSampleData(&w);
+  std::vector<unsigned char> blk(w.getFinalBuf(),w.getFinalBuf()+w.size());
+  w.finish();
+  size_t depthOff=8+s->name.size()+1+12;
+  printf("SMP2 block %u bytes, depth byte @%u = 0x%02X\n",(unsigned)blk.size(),(unsigned)depthOff,blk[depthOff]);
+  check("on-disk depth byte is 0xE1",blk[depthOff]==0xe1);
+  DivSample t;
+  {
+    SafeReader r(blk.data(),blk.size());
+    t.readSampleData(r,DIV_ENGINE_VERSION);
+  }
+  check("read back: SPU ADPCM, bytes/loop identical",sameSPU(s,&t) && t.loop && t.loopStart==ls && t.loopEnd==le);
+  std::vector<unsigned char> foreign=blk;
+  foreign[depthOff]=17;
+  DivSample u;
+  {
+    SafeReader r(foreign.data(),foreign.size());
+    u.readSampleData(r,DIV_ENGINE_VERSION);
+  }
+  SafeWriter w2;
+  w2.init();
+  u.putSampleData(&w2);
+  unsigned char back=w2.getFinalBuf()[depthOff];
+  w2.finish();
+  printf("raw depth 17 loads as in-memory %d, written back as %d\n",(int)u.depth,(int)back);
+  check("raw 17 does not load as SPU ADPCM; written back as 17",u.depth!=DIV_SAMPLE_DEPTH_SPU_ADPCM && back==17);
+
+  // loop flag sync: untouched when consistent, rewritten on a loop edit
+  std::vector<unsigned char> before(s->dataSPU,s->dataSPU+s->lengthSPU);
+  s->render((1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  check("render with consistent loop leaves the bytes untouched",memcmp(before.data(),s->dataSPU,s->lengthSPU)==0);
+  s->loopStart=560;
+  s->render((1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  s->getSPULoop(fl,fs,fe);
+  int diff=0;
+  for (unsigned int i=0; i<s->lengthSPU; i++) if (before[i]!=s->dataSPU[i]) diff++;
+  printf("loop start 280 -> 560: %d bytes changed (flag bytes only: %s), flags now loop %d..%d\n",diff,
+    [&]() { for (unsigned int i=0; i<s->lengthSPU; i++) if ((i&15)!=1 && before[i]!=s->dataSPU[i]) return "no"; return "yes"; }(),fs,fe);
+  check("loop edit rewrites flags only, to 560..1400",fl && fs==560 && fe==1400 && diff>0);
+  s->loop=false;
+  s->render((1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  s->getSPULoop(fl,fs,fe);
+  check("loop off: one-shot, end flag on the last block",!fl && fe==(int)s->samples);
+  s->loop=true; s->loopStart=ls; s->loopEnd=le;
+  s->render((1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  check("loop back to 280..1400 restores the original bytes",memcmp(before.data(),s->dataSPU,s->lengthSPU)==0);
+
+  // VAG round trip
+  String vagPath=String(tmpDir)+"/spu_roundtrip.vag";
+  String vagPath2=String(tmpDir)+"/spu_roundtrip2.vag";
+  check("saveVAG",s->saveVAG(vagPath.c_str()));
+  std::vector<unsigned char> vag, vag2;
+  fileBytes(vagPath.c_str(),vag);
+  printf("VAG: %u bytes, header:",(unsigned)vag.size());
+  for (int i=0; i<48; i++) printf("%s%02x",(i%16)?" ":"\n    ",vag[i]);
+  printf("\n");
+  DivSample v;
+  String err;
+  check("loadVAG",v.loadVAG(vag.data(),vag.size(),err));
+  check("VAG import: bytes identical, rate, name, loop",sameSPU(s,&v) && v.centerRate==s->centerRate && v.name==s->name && v.loop && v.loopStart==ls && v.loopEnd==le);
+  v.saveVAG(vagPath2.c_str());
+  fileBytes(vagPath2.c_str(),vag2);
+  check("export of the imported sample: file identical",vag==vag2);
+  if (extVag!=NULL) {
+    std::vector<unsigned char> ext;
+    DivSample x;
+    if (!fileBytes(extVag,ext) || !x.loadVAG(ext.data(),ext.size(),err)) {
+      printf("external VAG %s: FAIL (%s)\n",extVag,err.c_str());
+      ok=false;
+    } else {
+      x.getSPULoop(fl,fs,fe);
+      printf("external VAG %s: %u data bytes, rate %d, name \"%s\", loop %s %d..%d\n",extVag,x.lengthSPU,x.centerRate,x.name.c_str(),x.loop?"on":"off",x.loopStart,x.loopEnd);
+      check("external VAG data bytes kept as they are",x.lengthSPU<=ext.size()-48 && memcmp(x.dataSPU,ext.data()+48,x.lengthSPU)==0);
+    }
+  }
+
+  // PS1 loop hint for a 16-bit sample, loop 30..100 (the sample editor's warning text)
+  DivSample* h=newSample(1000,44100);
+  h->loop=true; h->loopStart=30; h->loopEnd=100;
+  printf("loop hint, 16-bit sample loop 30..100 on a PS1 song:\n");
+  if (h->loopStart%28) printf("  \"%s\"\n",fmt::sprintf("PS1: loop start must be a multiple of 28 (try with %d)",h->spuAlignHint(h->loopStart)).c_str());
+  if (h->loopEnd%28) printf("  \"%s\"\n",fmt::sprintf("PS1: loop end must be a multiple of 28 (try with %d)",h->spuAlignHint(h->loopEnd)).c_str());
+  check("hint suggests 28 and 112",h->spuAlignHint(30)==28 && h->spuAlignHint(100)==112);
+  delete h;
+
+  // platform: SPU ADPCM sample uploaded as stored, next to a 16-bit one encoded as before
+  DivEngine e;
+  DivSample* p16=newSample(len,44100);
+  for (int i=0; i<len; i++) p16->data16[i]=(short)round(12000.0*sin(2.0*M_PI*441.0*i/44100.0));
+  p16->loop=true; p16->loopStart=ls; p16->loopEnd=le;
+  // make the stored blocks deliberately differ from what encoding the decoded PCM would give:
+  // the platform must not re-encode them.
+  s->dataSPU[16*3+2]^=0x11;
+  s->render((1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM));
+  addSample(e,p16);
+  addSample(e,s);
+  DivPlatformPS1 ps1;
+  ps1.init(&e,24,44100,DivConfig());
+  ps1.renderSamples(0);
+  const DivMemoryComposition* mc=ps1.getMemCompo(0);
+  const unsigned char* mem=(const unsigned char*)ps1.getSampleMem(0);
+  bool up16=false, upSPU=false;
+  for (const DivMemoryEntry& m: mc->entries) {
+    if (m.type!=DIV_MEMORY_SAMPLE) continue;
+    if (m.asset==0) up16=(m.end-m.begin==refLen && memcmp(mem+m.begin,ref.data(),refLen)==0);
+    if (m.asset==1) upSPU=(m.end-m.begin==s->lengthSPU && memcmp(mem+m.begin,s->dataSPU,s->lengthSPU)==0);
+  }
+  ps1.quit();
+  check("PS1 upload: 16-bit sample encoded as before",up16);
+  check("PS1 upload: SPU ADPCM sample bytes as stored (modified block kept)",upSPU);
+  printf("spu: %s\n",ok?"all OK":"FAIL");
+  return ok?0:1;
+}
+
+// upload <song.fur> <bank.vab>: load the song, render its samples into SPU RAM, and compare
+// every uploaded sample with the VAB's ADPCM bodies.
+static int uploadArm(const char* songPath, const char* vabPath) {
+  std::vector<unsigned char> vab, song;
+  if (!fileBytes(vabPath,vab) || vab.size()<32 || memcmp(vab.data(),"pBAV",4)!=0) { printf("bad VAB %s\n",vabPath); return 1; }
+  if (!fileBytes(songPath,song)) { printf("cannot open %s\n",songPath); return 1; }
+  int nprog=vab[18]|(vab[19]<<8), nvag=vab[22]|(vab[23]<<8);
+  size_t obase=32+128*16+(size_t)nprog*16*32;
+  std::vector<std::vector<unsigned char>> bodies;
+  size_t o=obase+512;
+  for (int i=0; i<nvag; i++) {
+    size_t sz=(size_t)(vab[obase+2*i]|(vab[obase+2*i+1]<<8))<<3;
+    bodies.push_back(std::vector<unsigned char>(vab.begin()+o,vab.begin()+o+sz));
+    o+=sz;
+  }
+  DivEngine e;
+  e.preInit(true);
+  e.setAudio(DIV_AUDIO_DUMMY);
+  if (!e.init()) return 1;
+  unsigned char* b=new unsigned char[song.size()];
+  memcpy(b,song.data(),song.size());
+  if (!e.load(b,song.size(),songPath)) { printf("load failed\n"); return 1; }
+  DivDispatch* d=e.getDispatch(0);
+  const DivMemoryComposition* mc=d->getMemCompo(0);
+  const unsigned char* mem=(const unsigned char*)d->getSampleMem(0);
+  int compared=0, equal=0, spu=0;
+  for (const DivMemoryEntry& m: mc->entries) {
+    if (m.type!=DIV_MEMORY_SAMPLE) continue;
+    compared++;
+    if (e.song.sample[m.asset]->depth==DIV_SAMPLE_DEPTH_SPU_ADPCM) spu++;
+    int match=-1;
+    for (int i=0; i<nvag && match<0; i++) {
+      if (bodies[i].size()==m.end-m.begin && memcmp(bodies[i].data(),mem+m.begin,bodies[i].size())==0) match=i;
+    }
+    if (match>=0) equal++;
+    else printf("  sample %d (%s): %u bytes in SPU RAM, no identical VAB body\n",m.asset,e.song.sample[m.asset]->name.c_str(),(unsigned)(m.end-m.begin));
+  }
+  printf("%s: %d VAB bodies; %d samples (%d SPU ADPCM) uploaded; %d compared, %d byte-identical to a VAB body: %s\n",
+    songPath,nvag,e.song.sampleLen,spu,compared,equal,(compared>0 && equal==compared)?"ALL EQUAL":"MISMATCH");
+  // like the rvbregs arm: an init()ed engine's quit() can hang without audio/MIDI devices.
+  fflush(stdout);
+  _exit((compared>0 && equal==compared)?0:1);
+}
+
 int main(int argc, char** argv) {
   const char* mode=argc>1?argv[1]:"on";
+  if (strcmp(mode,"spu")==0) return spuArm(argc>2?argv[2]:"/tmp",argc>3?argv[3]:NULL);
+  if (strcmp(mode,"upload")==0) {
+    if (argc<4) { printf("usage: ps1spu_test upload <song.fur> <bank.vab>\n"); return 1; }
+    return uploadArm(argv[2],argv[3]);
+  }
   if (strcmp(mode,"fmt")==0) return fmtArm();
   if (strcmp(mode,"rvbregs")==0) return rvbRegsArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur",argc>3?argv[3]:NULL);
   if (strcmp(mode,"reverb")==0 || strcmp(mode,"noise")==0 || strcmp(mode,"pmod")==0) {

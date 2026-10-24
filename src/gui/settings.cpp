@@ -1290,6 +1290,7 @@ void FurnaceGUI::applyUISettings(bool updateFonts) {
   newFilePicker->registerType(".rf64",uiColors[GUI_COLOR_FILE_AUDIO],ICON_FA_FILE_AUDIO_O);
 
   newFilePicker->registerType(".brr",uiColors[GUI_COLOR_FILE_AUDIO_COMPRESSED],ICON_FA_FILE_AUDIO_O);
+  newFilePicker->registerType(".vag",uiColors[GUI_COLOR_FILE_AUDIO_COMPRESSED],ICON_FA_FILE_AUDIO_O);
   newFilePicker->registerType(".flac",uiColors[GUI_COLOR_FILE_AUDIO_COMPRESSED],ICON_FA_FILE_AUDIO_O);
   newFilePicker->registerType(".m1a",uiColors[GUI_COLOR_FILE_AUDIO_COMPRESSED],ICON_FA_FILE_AUDIO_O);
   newFilePicker->registerType(".mp1",uiColors[GUI_COLOR_FILE_AUDIO_COMPRESSED],ICON_FA_FILE_AUDIO_O);

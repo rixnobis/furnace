@@ -36,6 +36,10 @@ class PS1SPUBridge {
     static size_t encodeADPCM(const short* in, size_t len, int loopStart, int loopEnd, unsigned char* out, size_t outCap);
     // upper bound of encodeADPCM's output size for len samples.
     static size_t encodedSize(size_t len);
+    // decode len bytes (len/16 whole blocks) of SPU ADPCM to 28 samples per block, as one
+    // continuous stream (filter history carries across blocks; loop flags are ignored).
+    // returns the number of samples written.
+    static size_t decodeADPCM(const unsigned char* in, size_t len, short* out);
 
     PS1SPUBridge();
     ~PS1SPUBridge();

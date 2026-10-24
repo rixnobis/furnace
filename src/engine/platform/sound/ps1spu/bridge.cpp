@@ -199,6 +199,16 @@ void PS1SPUBridge::render(short* outL, short* outR, size_t total) {
 
 size_t PS1SPUBridge::encodedSize(size_t len) { return ((len + 27) / 28 + 1) * 16; }
 
+size_t PS1SPUBridge::decodeADPCM(const unsigned char* in, size_t len, short* out) {
+    PCSX::ADPCM::Decoder dec;
+    dec.reset();
+    const size_t blocks = len / 16;
+    for (size_t b = 0; b < blocks; b++) {
+        dec.decodeSPUBlock(in + b * 16, out + b * 28);
+    }
+    return blocks * 28;
+}
+
 size_t PS1SPUBridge::encodeADPCM(const short* in, size_t len, int loopStart, int loopEnd, unsigned char* out,
                                  size_t outCap) {
     using BA = PCSX::ADPCM::Encoder::BlockAttribute;

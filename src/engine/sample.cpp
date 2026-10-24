@@ -37,6 +37,22 @@ extern "C" {
 }
 #include "../../extern/adpcm-xq-s/adpcm-lib.h"
 #include "brrUtils.h"
+#include "platform/sound/ps1spu/bridge.h"
+
+unsigned char sampleDepthToFile(DivSampleDepth d) {
+  if (d==DIV_SAMPLE_DEPTH_SPU_ADPCM) return DIV_SAMPLE_DEPTH_FILE_SPU_ADPCM;
+  // a foreign (upstream) depth that collided with the fork-owned in-memory value
+  if (d==DIV_SAMPLE_DEPTH_FILE_FOREIGN) return (unsigned char)DIV_SAMPLE_DEPTH_SPU_ADPCM;
+  return (unsigned char)d;
+}
+
+DivSampleDepth sampleDepthFromFile(unsigned char v) {
+  if (v==DIV_SAMPLE_DEPTH_FILE_SPU_ADPCM) return DIV_SAMPLE_DEPTH_SPU_ADPCM;
+  // an upstream depth newer than this fork knows, numerically equal to the fork-owned in-memory
+  // value: keep it as an unknown depth so it is not mistaken for ours, and written back as v.
+  if (v==(unsigned char)DIV_SAMPLE_DEPTH_SPU_ADPCM) return DIV_SAMPLE_DEPTH_FILE_FOREIGN;
+  return (DivSampleDepth)v;
+}
 
 DivSampleHistory::~DivSampleHistory() {
   if (data!=NULL) delete[] data;
@@ -53,7 +69,7 @@ void DivSample::putSampleData(SafeWriter* w) {
   w->writeI(samples);
   w->writeI(centerRate);
   w->writeI(centerRate);
-  w->writeC(depth);
+  w->writeC(sampleDepthToFile(depth));
   w->writeC(loopMode);
   w->writeC(brrEmphasis);
   w->writeC((dither?1:0)|(brrNoFilter?2:0));
@@ -122,7 +138,7 @@ DivDataErrors DivSample::readSampleData(SafeReader& reader, short version) {
 
   if (isNewSample) {
     centerRate=reader.readI();
-    depth=(DivSampleDepth)reader.readC();
+    depth=sampleDepthFromFile(reader.readC());
     if (version>=123) {
       loopMode=(DivSampleLoopMode)reader.readC();
     } else {
@@ -160,7 +176,7 @@ DivDataErrors DivSample::readSampleData(SafeReader& reader, short version) {
     } else {
       reader.readI();
     }
-    depth=(DivSampleDepth)reader.readC();
+    depth=sampleDepthFromFile(reader.readC());
 
     // reserved
     reader.readC();
@@ -249,6 +265,163 @@ bool DivSample::isLoopable() {
   return loop && ((loopStart>=0 && loopStart<loopEnd) && (loopEnd>loopStart && loopEnd<=(int)samples));
 }
 
+// SPU ADPCM block flags (second byte of each 16-byte block, psx-spx "SPU ADPCM Samples").
+#define SPU_FLAG_END 1
+#define SPU_FLAG_REPEAT 2
+#define SPU_FLAG_START 4
+
+bool DivSample::getSPULoop(bool& loopOut, int& startOut, int& endOut) {
+  int blocks=(dataSPU==NULL)?0:(int)(lengthSPU/16);
+  // every start flag copies the current address to the repeat address (psx-spx LSAX), so the
+  // last one played before the end block wins.
+  int lastStart=-1;
+  loopOut=false;
+  startOut=0;
+  endOut=28*blocks;
+  for (int b=0; b<blocks; b++) {
+    unsigned char f=dataSPU[b*16+1];
+    if (f&SPU_FLAG_START) lastStart=b;
+    if (f&SPU_FLAG_END) {
+      endOut=28*(b+1);
+      if (f&SPU_FLAG_REPEAT) {
+        loopOut=true;
+        startOut=(lastStart<0)?0:28*lastStart;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool DivSample::syncSPULoopFlags() {
+  if (dataSPU==NULL) return false;
+  int blocks=lengthSPU/16;
+  if (blocks<1) return false;
+  bool fLoop=false;
+  int fStart=0, fEnd=0;
+  bool hasEnd=getSPULoop(fLoop,fStart,fEnd);
+  if (isLoopable()) {
+    int sb=loopStart/28;
+    int eb=(loopEnd+27)/28-1;
+    if (eb>=blocks) eb=blocks-1;
+    if (sb>eb) sb=eb;
+    if (fLoop && fStart==28*sb && fEnd==28*(eb+1)) return false;
+    // the encoder's layout: start block 6, body 2, end block 3
+    for (int b=0; b<blocks; b++) {
+      unsigned char f=dataSPU[b*16+1]&~(SPU_FLAG_END|SPU_FLAG_REPEAT|SPU_FLAG_START);
+      if (b==sb) f|=SPU_FLAG_START;
+      if (b>=sb && b<=eb) f|=SPU_FLAG_REPEAT;
+      if (b==eb) f|=SPU_FLAG_END;
+      dataSPU[b*16+1]=f;
+    }
+  } else {
+    if (hasEnd && !fLoop) return false;
+    // one-shot: plays to the end of the data, where the end flag (without repeat) stops it
+    for (int b=0; b<blocks; b++) {
+      dataSPU[b*16+1]&=~(SPU_FLAG_END|SPU_FLAG_REPEAT|SPU_FLAG_START);
+    }
+    dataSPU[(blocks-1)*16+1]|=SPU_FLAG_END;
+  }
+  logD("SPU ADPCM sample %s: loop flags rewritten to match its loop",name);
+  return true;
+}
+
+int DivSample::spuAlignHint(int pos) {
+  int tryWith=((pos+14)/28)*28;
+  if (tryWith>(int)samples) tryWith-=28;
+  if (tryWith<0) tryWith=0;
+  return tryWith;
+}
+
+static void putBE32(unsigned char* p, unsigned int v) {
+  p[0]=v>>24;
+  p[1]=v>>16;
+  p[2]=v>>8;
+  p[3]=v;
+}
+
+void DivSample::loopFromSPUFlags() {
+  bool l=false;
+  int ls=0, le=0;
+  getSPULoop(l,ls,le);
+  loopMode=DIV_SAMPLE_LOOP_FORWARD;
+  if (l) {
+    loop=true;
+    loopStart=ls;
+    loopEnd=le;
+  } else {
+    loop=false;
+    loopStart=-1;
+    loopEnd=samples;
+  }
+}
+
+static unsigned int getBE32(const unsigned char* p) {
+  return ((unsigned int)p[0]<<24)|((unsigned int)p[1]<<16)|((unsigned int)p[2]<<8)|p[3];
+}
+
+bool DivSample::loadVAG(const unsigned char* buf, size_t len, String& err) {
+  if (len<48 || memcmp(buf,"VAGp",4)!=0) {
+    err="not a VAG file (no VAGp header)!";
+    return false;
+  }
+  size_t dataLen=getBE32(buf+12);
+  // some writers count the header in, or leave the size out: never read past the file.
+  if (dataLen==0 || dataLen>len-48) dataLen=len-48;
+  dataLen&=~(size_t)15;
+  if (dataLen==0) {
+    err="VAG file has no sample data!";
+    return false;
+  }
+  if (28*(dataLen/16)>16777215) {
+    err="this sample is too big! max sample size is 16777215.";
+    return false;
+  }
+  unsigned int rate=getBE32(buf+16);
+  char vagName[17];
+  memcpy(vagName,buf+32,16);
+  vagName[16]=0;
+  for (int i=0; i<16 && vagName[i]; i++) {
+    if ((unsigned char)vagName[i]<0x20) vagName[i]=' ';
+  }
+  depth=DIV_SAMPLE_DEPTH_SPU_ADPCM;
+  if (!init(28*(dataLen/16))) {
+    err="could not allocate the sample!";
+    return false;
+  }
+  memcpy(dataSPU,buf+48,dataLen);
+  if (rate>=100 && rate<=1000000) centerRate=rate;
+  if (vagName[0]) name=vagName;
+  loopFromSPUFlags();
+  return true;
+}
+
+// VAG: 48-byte big-endian header ("VAGp", version, reserved, data size, sample rate, 12
+// reserved bytes, 16-byte name), then the SPU ADPCM blocks as stored.
+bool DivSample::saveVAG(const char* path) {
+  if (depth!=DIV_SAMPLE_DEPTH_SPU_ADPCM || dataSPU==NULL || lengthSPU<16) {
+    logE("only an SPU ADPCM sample can be saved as VAG!");
+    return false;
+  }
+  unsigned char header[48];
+  memset(header,0,48);
+  memcpy(header,"VAGp",4);
+  putBE32(header+4,0x20);
+  putBE32(header+12,lengthSPU);
+  putBE32(header+16,centerRate);
+  memcpy(header+32,name.c_str(),MIN(name.size(),(size_t)16));
+
+  FILE* f=ps_fopen(path,"wb");
+  if (f==NULL) {
+    logE("could not save sample: %s!",strerror(errno));
+    return false;
+  }
+  bool ok=fwrite(header,1,48,f)==48 && fwrite(dataSPU,1,lengthSPU,f)==lengthSPU;
+  fclose(f);
+  if (!ok) logE("could not write the whole VAG file!");
+  return ok;
+}
+
 int DivSample::getSampleOffset(int offset, int length, DivSampleDepth depth) {
   if ((length==0) || (offset==length)) {
     int off=offset;
@@ -300,6 +473,9 @@ int DivSample::getSampleOffset(int offset, int length, DivSampleDepth depth) {
         break;
       case DIV_SAMPLE_DEPTH_4BIT:
         off=(offset+1)/2;
+        break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+        off=16*((offset+27)/28);
         break;
       default:
         break;
@@ -373,6 +549,10 @@ int DivSample::getSampleOffset(int offset, int length, DivSampleDepth depth) {
         off=offset*2;
         len=length*2;
         break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+        off=16*((offset+27)/28);
+        len=16*((length+27)/28);
+        break;
       default:
         break;
     }
@@ -438,6 +618,9 @@ int DivSample::getEndPosition(DivSampleDepth depth) {
       break;
     case DIV_SAMPLE_DEPTH_16BIT:
       off=length16;
+      break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      off=lengthSPU;
       break;
     default:
       break;
@@ -654,6 +837,12 @@ bool DivSample::initInternal(DivSampleDepth d, int count) {
       length16=count*2;
       data16=new short[(count+511)&(~0x1ff)];
       memset(data16,0,((count+511)&(~0x1ff))*sizeof(short));
+      break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM: // SPU ADPCM (one spare block: the encoder's end block)
+      if (dataSPU!=NULL) delete[] dataSPU;
+      lengthSPU=16*((count+27)/28);
+      dataSPU=new unsigned char[lengthSPU+16];
+      memset(dataSPU,0,lengthSPU+16);
       break;
     default:
       return false;
@@ -889,6 +1078,9 @@ void DivSample::convert(DivSampleDepth newDepth, unsigned int formatMask) {
       break;
     case DIV_SAMPLE_DEPTH_BRR: // BRR
       setSampleCount(16*(lengthBRR/9));
+      break;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM: // SPU ADPCM
+      setSampleCount(28*(lengthSPU/16));
       break;
     case DIV_SAMPLE_DEPTH_VOX: // VOX
       setSampleCount((samples+1)&(~1));
@@ -1325,6 +1517,14 @@ void DivSample::render(unsigned int formatMask) {
       case DIV_SAMPLE_DEPTH_BRR: // BRR
         brrDecode(dataBRR,data16,lengthBRR,brrEmphasis);
         break;
+      case DIV_SAMPLE_DEPTH_SPU_ADPCM: { // SPU ADPCM
+        // the stored blocks are what the PS1 plays: only their loop flags follow the editor.
+        syncSPULoopFlags();
+        size_t blocks=lengthSPU/16;
+        if (blocks*28>samples) blocks=samples/28;
+        PS1SPUBridge::decodeADPCM(dataSPU,blocks*16,data16);
+        break;
+      }
       case DIV_SAMPLE_DEPTH_VOX: // VOX
         oki_decode(dataVOX,data16,samples);
         break;
@@ -1500,6 +1700,11 @@ void DivSample::render(unsigned int formatMask) {
     if (!initInternal(DIV_SAMPLE_DEPTH_BRR,sampleCount)) return;
     brrEncode(data16,dataBRR,sampleCount,loop?loopStart:-1,brrEmphasis,brrNoFilter);
   }
+  if (NOT_IN_FORMAT(DIV_SAMPLE_DEPTH_SPU_ADPCM)) { // SPU ADPCM
+    if (!initInternal(DIV_SAMPLE_DEPTH_SPU_ADPCM,samples)) return;
+    // same encoding as the PS1 platform's upload of a 16-bit sample (loop flags included)
+    lengthSPU=PS1SPUBridge::encodeADPCM(data16,samples,isLoopable()?loopStart:-1,loopEnd,dataSPU,lengthSPU+16);
+  }
   if (NOT_IN_FORMAT(DIV_SAMPLE_DEPTH_VOX)) { // VOX
     if (!initInternal(DIV_SAMPLE_DEPTH_VOX,samples)) return;
     oki_encode(data16,dataVOX,samples);
@@ -1615,6 +1820,8 @@ void* DivSample::getCurBuf() {
       return data12;
     case DIV_SAMPLE_DEPTH_4BIT:
       return data4;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      return dataSPU;
     case DIV_SAMPLE_DEPTH_16BIT:
       return data16;
     default:
@@ -1655,6 +1862,8 @@ unsigned int DivSample::getCurBufLen() {
       return length12;
     case DIV_SAMPLE_DEPTH_4BIT:
       return length4;
+    case DIV_SAMPLE_DEPTH_SPU_ADPCM:
+      return lengthSPU;
     case DIV_SAMPLE_DEPTH_16BIT:
       return length16;
     default:
@@ -1770,4 +1979,5 @@ DivSample::~DivSample() {
   if (dataIMA) delete[] dataIMA;
   if (data12) delete[] data12;
   if (data4) delete[] data4;
+  if (dataSPU) delete[] dataSPU;
 }

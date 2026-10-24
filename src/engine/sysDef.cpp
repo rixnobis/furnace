@@ -2822,7 +2822,7 @@ void DivEngine::registerSystems() {
 
   sysDefs[DIV_SYSTEM_PS1]=new DivSysDef(
     _("Sony PlayStation SPU"), NULL, 0xe1, 0, 24, 24, 24,
-    false, true, 0, false, (1U<<DIV_SAMPLE_DEPTH_16BIT), 0, 0,
+    false, true, 0, false, (1U<<DIV_SAMPLE_DEPTH_16BIT)|(1U<<DIV_SAMPLE_DEPTH_SPU_ADPCM), 0, 0,
     _("the sound processor of Sony's first video game console. 24 channels of ADPCM samples with hardware envelopes and reverb."),
     DivChanDefFunc(simpleChanDef<DIV_CH_PCM,DIV_INS_PS1,DIV_INS_AMIGA>),
     {},

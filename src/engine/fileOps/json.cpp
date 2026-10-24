@@ -933,7 +933,7 @@ JSON serializeSample(DivSample* sample) {
   json["loop"]["end"]=sample->loopEnd;
   json["loop"]["enabled"]=sample->loop;
   json["loop"]["mode"]=sample->loopMode;
-  json["depth"]=sample->depth;
+  json["depth"]=sampleDepthToFile(sample->depth);
   json["brrEmphasis"]=sample->brrEmphasis;
   json["brrNoFilter"]=sample->brrNoFilter;
   json["dither"]=sample->dither;
