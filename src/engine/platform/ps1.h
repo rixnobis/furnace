@@ -144,6 +144,11 @@ class DivPlatformPS1: public DivDispatch {
     static unsigned int reverbRequired(const unsigned short* regs);
     // flags -> register set, base and warnings (the loading rule, see ps1.cpp)
     static void reverbResolve(const DivConfig& flags, ReverbSetup& s);
+    void toggleRegisterDump(bool enable);
+    // SPU RAM byte address where renderSamples starts placing samples (after the capture buffers)
+    unsigned int getSampleBase();
+    // SPU RAM byte address of the reverb work area (RAM_SIZE when reverb is off)
+    unsigned int getReverbBase();
     int reverbWarnings() { return rvbWarn; }
     int reverbSamplesDropped() { return rvbSamplesDropped; }
     DivPlatformPS1();

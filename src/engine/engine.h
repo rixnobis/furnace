@@ -1257,6 +1257,9 @@ class DivEngine {
   friend class DivExportZSM;
   friend class DivExportiPod;
   friend class DivExportGRUB;
+  friend class DivExportSPUDump;
+  // PS1 SPUDUMP replay harness (src/engine/platform/sound/ps1spu/spd_replay.cpp, not built by default)
+  friend class DivPS1SPDHarness;
 
   public:
     // the loaded song. this is public for convenience.

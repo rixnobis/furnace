@@ -142,4 +142,16 @@ void DivEngine::registerROMExports() {
     },
     false, DIV_REQPOL_ANY
   );
+
+  romExportDefs[DIV_ROM_SPUDUMP]=new DivROMExportDef(
+    "PlayStation SPUDUMP", "Rix",
+    "SPU register stream (PSXSPUDUMPv1r1) for the nugget SPD player:\n"
+    "out.spudump (the stream) and out.spubank (samples), loaded with SPD_LoadEx().\n"
+    "- https://github.com/pcsx-redux/nugget (spdplayer)",
+    "SPUDUMP files", ".spudump",
+    {
+      DIV_SYSTEM_PS1
+    },
+    true, DIV_REQPOL_EXACT
+  );
 }
