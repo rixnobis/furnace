@@ -94,7 +94,9 @@ def main():
                 continue
             ev.append((e[0], ti, k, e))
     ev.sort()
-    hz = ppq * 1e6 / tempo
+    # the SPUDUMP tick-rate packet is 16.16 fixed point: keep the engine on a rate the export
+    # stores exactly, so a replay of the export stays sample-locked to the tracker
+    hz = round(ppq * 1e6 / tempo * 65536) / 65536
 
     # ---- GM program -> VAB program: midi2psm numbers the bank's programs in order of first
     # use; recover it from the order programs are first heard (drums are the kit program).
