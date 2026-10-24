@@ -4,7 +4,8 @@
 // (the vendored pcsx-redux core) from the exported out.spudump/out.spubank, bypassing
 // Furnace's engine; its output is compared against Furnace driving the same core.
 // usage:
-//   ps1spu_spdplay check <song.fur> <song.spudump> <bank.spubank> [furnace-cli.wav] [master]
+//   [SPD_PASSES=2] ps1spu_spdplay check <song.fur> <song.spudump> <bank.spubank> [furnace-cli.wav] [master]
+//     SPD_PASSES=2 also compares the loop-back pass (default 1)
 //     replay (SPD_LoadEx(song,bank), one poll per tick at the engine's tick spacing) vs the
 //     engine reference (playSub, nextTick, the platform's acquire for each tick's samples,
 //     i.e. the raw core output before Furnace's mixer), then vs the CLI render if given.
@@ -371,7 +372,8 @@ class DivPS1SPDHarness {
   public:
   // the engine driving the core, one tick at a time: raw core output and the tick spacing
   static double divider;
-  static bool reference(DivEngine& e, std::vector<short>& out, std::vector<int>& tickLen) {
+  // passes: how many times through the song (2 = the loop-back pass as well)
+  static bool reference(DivEngine& e, std::vector<short>& out, std::vector<int>& tickLen, int passes=1) {
     DivDispatch* d=e.disCont[0].dispatch;
     e.got.rate=PS1SPUBridge::RATE;
     e.stop();
@@ -384,8 +386,10 @@ class DivPS1SPDHarness {
     e.playSub(false);
     divider=e.divider;
     std::vector<short> l, r;
+    int ends=0;
     while (true) {
-      if (e.nextTick() || !e.playing) break;
+      if (e.nextTick() && ++ends>=passes) break;
+      if (!e.playing) break;
       int n=e.cycles;
       tickLen.push_back(n);
       if (n<=0) continue;
@@ -485,7 +489,11 @@ static int checkArm(const char* furPath, const char* spdPath, const char* bankPa
 
   std::vector<short> ref;
   std::vector<int> tickLen;
-  DivPS1SPDHarness::reference(e,ref,tickLen);
+  const char* passEnv=getenv("SPD_PASSES");
+  int passes=passEnv?atoi(passEnv):1;
+  if (passes<1) passes=1;
+  printf("  passes: %d\n",passes);
+  DivPS1SPDHarness::reference(e,ref,tickLen,passes);
 
   // replay
   PS1SPUBridge spu;
