@@ -3119,7 +3119,8 @@ bool FurnaceGUI::drawSysConf(int chan, int sysPos, DivSystem type, DivConfig& fl
       if (reverbPreset==0) {
         ImGui::Text(_("(reverb off)"));
       } else {
-        ImGui::Text(_("= %.5X: area %u bytes, registers need %u bytes"),rs.base,PS1SPUBridge::RAM_SIZE-rs.base,rs.required);
+        ImGui::Text(_("= %.5X"),rs.base);
+        ImGui::TextWrapped(_("area %u bytes, registers need %u bytes"),PS1SPUBridge::RAM_SIZE-rs.base,rs.required);
         int dropped=0;
         if (chan>=0 && e->getDispatch(chan)!=NULL) {
           dropped=((DivPlatformPS1*)e->getDispatch(chan))->reverbSamplesDropped();
