@@ -44,6 +44,9 @@
 #include "../platform/ps1.h"
 #include "../../ta-log.h"
 #include <fmt/printf.h>
+#include <algorithm>
+#include <functional>
+#include <map>
 
 #define SPD_PKT_REG_WRITE 0x00
 #define SPD_PKT_WAIT 0x01
@@ -59,6 +62,9 @@
 #define SPD_PKT_VOICE_COUNT 0x45
 
 #define SPD_VREG_WAIT 0xefff
+#define SPD_PKT_MACRO_DEF 0x13
+#define SPD_MAX_MACROS 256
+#define SPD_MAX_MACRO_WRITES 8
 
 // spdplayer limits (MAX_ORDERS, MAX_PATTERNS, MAX_SAMPLES)
 #define SPD_MAX_PATTERNS 256
@@ -438,6 +444,122 @@ void DivExportSPUDump::run() {
     streams.push_back(out);
   }
 
+  // macros (0x13): a run of consecutive writes to one voice inside a register write packet,
+  // seen often enough, is defined once (voice 0 relative) and invoked as one 0xF000|index
+  // word. only whole consecutive runs are replaced, so the SPU sees the same writes in the
+  // same order.
+  std::vector<std::vector<unsigned int>> macroDefs;
+  {
+    auto forEachRun=[&](std::vector<unsigned int>& s, const std::function<void(size_t,size_t)>& f) {
+      size_t i=0;
+      while (i<s.size()) {
+        unsigned int type=s[i]>>24, len=s[i]&0xffffff;
+        if (type==SPD_PKT_REG_WRITE) {
+          size_t a=i+1, e=i+1+len;
+          while (a<e) {
+            unsigned int off=s[a]>>16;
+            if (off>=0x180) { a++; continue; }
+            size_t b=a+1;
+            while (b<e && b-a<SPD_MAX_MACRO_WRITES && (s[b]>>16)<0x180 && ((s[b]>>16)>>4)==(off>>4)) b++;
+            if (b-a>=2) f(a,b);
+            a=b;
+          }
+        }
+        i+=1+len;
+      }
+    };
+    auto keyOf=[](const std::vector<unsigned int>& s, size_t a, size_t b) {
+      std::vector<unsigned int> k;
+      for (size_t j=a; j<b; j++) k.push_back((((s[j]>>16)&0xf)<<16)|(s[j]&0xffff));
+      return k;
+    };
+    std::map<std::vector<unsigned int>,size_t> uses;
+    for (std::vector<unsigned int>& s: streams) {
+      forEachRun(s,[&](size_t a, size_t b) { uses[keyOf(s,a,b)]++; });
+    }
+    std::vector<std::pair<long,std::vector<unsigned int>>> cand;
+    for (auto& u: uses) {
+      long save=(long)u.second*(long)(u.first.size()-1)-(long)(u.first.size()+2);
+      if (save>0) cand.push_back(std::make_pair(save,u.first));
+    }
+    std::sort(cand.begin(),cand.end(),[](const std::pair<long,std::vector<unsigned int>>& x, const std::pair<long,std::vector<unsigned int>>& y) {
+      return x.first>y.first || (x.first==y.first && x.second<y.second);
+    });
+    std::map<std::vector<unsigned int>,unsigned int> index;
+    for (auto& c: cand) {
+      if (macroDefs.size()>=SPD_MAX_MACROS) break;
+      index[c.second]=(unsigned int)macroDefs.size();
+      macroDefs.push_back(c.second);
+    }
+    if (!macroDefs.empty()) {
+      for (std::vector<unsigned int>& s: streams) {
+        std::vector<unsigned int> o;
+        size_t i=0;
+        while (i<s.size()) {
+          unsigned int type=s[i]>>24, len=s[i]&0xffffff;
+          if (type!=SPD_PKT_REG_WRITE) {
+            o.insert(o.end(),s.begin()+i,s.begin()+i+1+len);
+            i+=1+len;
+            continue;
+          }
+          std::vector<unsigned int> payload(s.begin()+i+1,s.begin()+i+1+len);
+          std::vector<unsigned int> np;
+          std::vector<std::pair<size_t,size_t>> runs;
+          std::vector<unsigned int> one(s.begin()+i,s.begin()+i+1+len);
+          forEachRun(one,[&](size_t a, size_t b) { runs.push_back(std::make_pair(a-1,b-1)); });
+          size_t r=0;
+          for (size_t j=0; j<payload.size();) {
+            if (r<runs.size() && runs[r].first==j) {
+              std::vector<unsigned int> k=keyOf(payload,runs[r].first,runs[r].second);
+              auto it=index.find(k);
+              if (it!=index.end()) {
+                np.push_back(((0xf000U|it->second)<<16)|((payload[j]>>16)>>4));
+              } else {
+                np.insert(np.end(),payload.begin()+runs[r].first,payload.begin()+runs[r].second);
+              }
+              j=runs[r].second;
+              r++;
+              continue;
+            }
+            np.push_back(payload[j]);
+            j++;
+          }
+          o.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|(unsigned int)np.size());
+          o.insert(o.end(),np.begin(),np.end());
+          i+=1+len;
+        }
+        s=o;
+      }
+    }
+  }
+
+  // identical streams share one pattern; the order table carries the playback order. only
+  // when the tick rate never changes, since a stream's rate packets are relative to the rate
+  // it is entered with.
+  std::vector<unsigned int> orderPat;
+  {
+    bool rateMoves=false;
+    for (SPDPattern& p: pats) for (SPDTick& t: p.ticks) if (t.rate!=initRate) rateMoves=true;
+    std::vector<std::vector<unsigned int>> uniq;
+    std::map<std::vector<unsigned int>,unsigned int> seen;
+    for (std::vector<unsigned int>& s: streams) {
+      auto it=rateMoves?seen.end():seen.find(s);
+      if (it!=seen.end()) {
+        orderPat.push_back(it->second);
+      } else {
+        unsigned int idx=(unsigned int)uniq.size();
+        if (!rateMoves) seen[s]=idx;
+        uniq.push_back(s);
+        orderPat.push_back(idx);
+      }
+    }
+    streams=uniq;
+    packets=0;
+    for (std::vector<unsigned int>& s: streams) {
+      for (size_t i=0; i<s.size(); i+=1+(s[i]&0xffffff)) packets++;
+    }
+  }
+
   // song file
   SafeWriter* w=new SafeWriter;
   w->init();
@@ -455,19 +577,25 @@ void DivExportSPUDump::run() {
   writeWord(w,SPD_PKT_TICK_RATE,initRate);
   writeWord(w,SPD_PKT_VOICE_COUNT,(unsigned int)voiceCount);
   headerPackets+=3;
-  writeHeader(w,SPD_PKT_ORDER_TABLE,2+(unsigned int)pats.size());
+  for (size_t i=0; i<macroDefs.size(); i++) {
+    writeHeader(w,SPD_PKT_MACRO_DEF,1+(unsigned int)macroDefs[i].size());
+    w->writeI((unsigned int)i);
+    for (unsigned int m: macroDefs[i]) w->writeI(m);
+    headerPackets++;
+  }
+  writeHeader(w,SPD_PKT_ORDER_TABLE,2+(unsigned int)orderPat.size());
   w->writeI(loop?1:0);
   w->writeI(loop?(unsigned int)loopPat:0);
-  for (size_t i=0; i<pats.size(); i++) w->writeI((unsigned int)i);
+  for (unsigned int o: orderPat) w->writeI(o);
   headerPackets++;
   size_t hdrPos=w->tell();
-  size_t streamPos=hdrPos+pats.size()*8;
-  for (size_t i=0; i<pats.size(); i++) {
+  size_t streamPos=hdrPos+streams.size()*8;
+  for (size_t i=0; i<streams.size(); i++) {
     writeHeader(w,SPD_PKT_PATTERN_HDR,1);
     w->writeI((unsigned int)streamPos);
     streamPos+=streams[i].size()*4;
   }
-  headerPackets+=pats.size();
+  headerPackets+=streams.size();
   for (std::vector<unsigned int>& s: streams) {
     for (unsigned int i: s) w->writeI(i);
   }
@@ -531,7 +659,7 @@ void DivExportSPUDump::run() {
     bankPackets++;
   }
 
-  logAppendf("%d patterns (loop to %d), %d ticks, %d voices",(int)pats.size(),loop?loopPat:-1,(int)totalTicks,voiceCount);
+  logAppendf("%d orders, %d patterns (loop to %d), %d macros, %d ticks, %d voices",(int)orderPat.size(),(int)streams.size(),loop?loopPat:-1,(int)macroDefs.size(),(int)totalTicks,voiceCount);
   logAppendf("out.spudump: %d bytes, %d packets",(int)w->size(),(int)(headerPackets+packets));
   logAppendf("out.spubank: %d bytes, %d packets",(int)wb->size(),(int)bankPackets);
   progress[0].amount=1.0f;
