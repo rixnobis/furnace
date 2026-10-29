@@ -6,7 +6,9 @@
 #include <stddef.h>
 
 // Each instance is a self-contained core, run synchronously on the calling thread (no mixer
-// thread). One instance must not be called from two threads at once; distinct instances may.
+// thread). One instance must not be called from two threads at once. Distinct instances must
+// not render interleaved either: the core keeps the reverb resampling FIR history in globals
+// (spu/reverb.cc), so each render() continues the history the last one left.
 class PS1SPUBridge {
   struct Impl;
   Impl* p;
