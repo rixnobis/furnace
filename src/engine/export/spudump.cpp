@@ -37,11 +37,15 @@
 // the loop: the platform skips writes its register cache already holds, so the song entered
 // from its own end can write differently than from a cold start. the export plays the loop
 // twice and appends the loop-back patterns whose effect differs, looping into the first pass's
-// copies once the two agree in effect and register state.
+// copies once the two agree in effect and register state. it also builds the compact encoding
+// (pass 1 plus one register fix-up pattern at the loop point), replays the second pass of both
+// through the vendored SPU core (spd_player.h) and writes the compact one only if the two
+// render alike.
 
 #include "spudump.h"
 #include "../engine.h"
 #include "../platform/ps1.h"
+#include "../platform/sound/ps1spu/spd_player.h"
 #include "../../ta-log.h"
 #include <fmt/printf.h>
 #include <algorithm>
@@ -136,7 +140,24 @@ struct SPDPattern {
   int order;
   std::vector<unsigned int> snapshot;
   std::vector<SPDTick> ticks;
+  // compact loop fix-up: snapshot holds the writes, played in the same poll as the loop
+  // target's first tick (no wait, spdplayer goes on through END_PATTERN); rate!=0 sets the rate
+  bool fixup=false;
+  unsigned int fixupRate=0;
 };
+
+// the value spdplayer's SPD_LoadEx leaves in a snapshot register (SPUInit, SPUResetVoice,
+// SPUUnMute); false where it writes nothing (main volume is the player's master volume)
+static bool spdInitValue(unsigned int r, unsigned short& val) {
+  if (r<0x180) {
+    val=((r&15)==0x8)?0x000f:0;
+    return true;
+  }
+  if (r>=0x190 && r<=0x19a) { val=0; return true; }
+  if (r>=0x1b0 && r<=0x1b6) { val=0; return true; }
+  if (r==0x1aa) { val=0xc000; return true; }
+  return false;
+}
 
 // one tick's batch followed by a gap of d ticks, spdplayer timing (see top of file).
 static void emitBatch(std::vector<unsigned int>& out, std::vector<unsigned int>& words, unsigned int d, size_t& packets) {
@@ -358,6 +379,10 @@ void DivExportSPUDump::run() {
     return;
   }
   if (loopPat>=(int)pats.size()) loopPat=0;
+  // pass 1 alone, for the compact loop encoding
+  size_t pass1Len=pats.size();
+  int loopPat1=loopPat;
+  size_t appended=0;
   // loop-back pass: where it takes a different effect from the first pass, append its differing
   // head (loop target up to where the passes agree to the end) and loop to the first pass's
   // copy of the rest: [P0..Pn, PT'..Pj-1'], loop target j
@@ -385,220 +410,252 @@ void DivExportSPUDump::run() {
       if (j>0) {
         logAppendf("loop-back pass takes a different effect in its first %d of %d patterns; appended",(int)j,(int)n2);
         int oldLoop=loopPat;
+        appended=j;
         for (size_t i=0; i<j; i++) pats.push_back(pats2[i]);
         loopPat=(j<n2)?(oldLoop+(int)j):(int)(pats.size()-j);
       }
     }
-  }
-  if (pats.size()>SPD_MAX_PATTERNS) {
-    logAppendf("WARNING: %d patterns; spdplayer plays at most %d",(int)pats.size(),SPD_MAX_PATTERNS);
   }
   int voiceCount=0;
   for (int i=0; i<24; i++) {
     if (voicesUsed&(1U<<i)) voiceCount=i+1;
   }
 
-  // pattern streams
-  std::vector<std::vector<unsigned int>> streams;
-  size_t packets=0;
-  unsigned int curRate=initRate;
-  for (size_t pi=0; pi<pats.size(); pi++) {
-    SPDPattern& p=pats[pi];
-    std::vector<unsigned int> out;
-    std::vector<unsigned int> batch=p.snapshot;
-    size_t n=p.ticks.size();
-    size_t lastTick=0;
-    bool havePending=false;
-    for (size_t ti=0; ti<n; ti++) {
-      SPDTick& t=p.ticks[ti];
-      bool rateChange=(t.rate!=curRate);
-      if (ti==0 || !t.words.empty() || rateChange) {
-        if (havePending) {
-          emitBatch(out,batch,(unsigned int)(ti-lastTick),packets);
-          batch.clear();
-        }
-        if (rateChange) {
-          // takes effect for the gap after this tick, as in the engine
+  // the song file for a pattern list: pattern streams, macros, order table, pattern headers
+  struct SPDSong {
+    SafeWriter* w=NULL;
+    int orders=0, patterns=0, macros=0;
+    size_t packets=0;
+  };
+  auto writeSong=[&](std::vector<SPDPattern>& pats, int loopPat) {
+    // pattern streams
+    std::vector<std::vector<unsigned int>> streams;
+    size_t packets=0;
+    unsigned int curRate=initRate;
+    for (size_t pi=0; pi<pats.size(); pi++) {
+      SPDPattern& p=pats[pi];
+      std::vector<unsigned int> out;
+      if (p.fixup) {
+        if (p.fixupRate) {
           out.push_back(((unsigned int)SPD_PKT_TICK_RATE<<24)|1);
-          out.push_back(t.rate);
+          out.push_back(p.fixupRate);
           packets++;
-          curRate=t.rate;
         }
-        batch.insert(batch.end(),t.words.begin(),t.words.end());
-        lastTick=ti;
-        havePending=true;
+        if (!p.snapshot.empty()) {
+          out.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|(unsigned int)p.snapshot.size());
+          out.insert(out.end(),p.snapshot.begin(),p.snapshot.end());
+          packets++;
+        }
+        out.push_back((unsigned int)SPD_PKT_END_PATTERN<<24);
+        packets++;
+        streams.push_back(out);
+        continue;
       }
-    }
-    unsigned int d=(unsigned int)(n-lastTick);
-    emitBatch(out,batch,d,packets);
-    if (pi==pats.size()-1 && !loop && voiceCount>0) {
-      // end of a non-looping song: release every voice the stream used
-      unsigned int mask=(voiceCount>=24)?0xffffff:((1U<<voiceCount)-1);
-      out.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|((mask>>16)?2:1));
-      out.push_back((SPD_KOFF_LO<<16)|(mask&0xffff));
-      if (mask>>16) out.push_back((SPD_KOFF_HI<<16)|(mask>>16));
-      packets++;
-    }
-    out.push_back((unsigned int)SPD_PKT_END_PATTERN<<24);
-    packets++;
-    streams.push_back(out);
-  }
-
-  // macros (0x13): a run of consecutive writes to one voice inside a register write packet,
-  // seen often enough, is defined once (voice 0 relative) and invoked as one 0xF000|index
-  // word. only whole consecutive runs are replaced, so the SPU sees the same writes in the
-  // same order.
-  std::vector<std::vector<unsigned int>> macroDefs;
-  {
-    auto forEachRun=[&](std::vector<unsigned int>& s, const std::function<void(size_t,size_t)>& f) {
-      size_t i=0;
-      while (i<s.size()) {
-        unsigned int type=s[i]>>24, len=s[i]&0xffffff;
-        if (type==SPD_PKT_REG_WRITE) {
-          size_t a=i+1, e=i+1+len;
-          while (a<e) {
-            unsigned int off=s[a]>>16;
-            if (off>=0x180) { a++; continue; }
-            size_t b=a+1;
-            while (b<e && b-a<SPD_MAX_MACRO_WRITES && (s[b]>>16)<0x180 && ((s[b]>>16)>>4)==(off>>4)) b++;
-            if (b-a>=2) f(a,b);
-            a=b;
+      std::vector<unsigned int> batch=p.snapshot;
+      size_t n=p.ticks.size();
+      size_t lastTick=0;
+      bool havePending=false;
+      for (size_t ti=0; ti<n; ti++) {
+        SPDTick& t=p.ticks[ti];
+        bool rateChange=(t.rate!=curRate);
+        if (ti==0 || !t.words.empty() || rateChange) {
+          if (havePending) {
+            emitBatch(out,batch,(unsigned int)(ti-lastTick),packets);
+            batch.clear();
           }
+          if (rateChange) {
+            // takes effect for the gap after this tick, as in the engine
+            out.push_back(((unsigned int)SPD_PKT_TICK_RATE<<24)|1);
+            out.push_back(t.rate);
+            packets++;
+            curRate=t.rate;
+          }
+          batch.insert(batch.end(),t.words.begin(),t.words.end());
+          lastTick=ti;
+          havePending=true;
         }
-        i+=1+len;
       }
-    };
-    auto keyOf=[](const std::vector<unsigned int>& s, size_t a, size_t b) {
-      std::vector<unsigned int> k;
-      for (size_t j=a; j<b; j++) k.push_back((((s[j]>>16)&0xf)<<16)|(s[j]&0xffff));
-      return k;
-    };
-    std::map<std::vector<unsigned int>,size_t> uses;
-    for (std::vector<unsigned int>& s: streams) {
-      forEachRun(s,[&](size_t a, size_t b) { uses[keyOf(s,a,b)]++; });
+      unsigned int d=(unsigned int)(n-lastTick);
+      emitBatch(out,batch,d,packets);
+      if (pi==pats.size()-1 && !loop && voiceCount>0) {
+        // end of a non-looping song: release every voice the stream used
+        unsigned int mask=(voiceCount>=24)?0xffffff:((1U<<voiceCount)-1);
+        out.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|((mask>>16)?2:1));
+        out.push_back((SPD_KOFF_LO<<16)|(mask&0xffff));
+        if (mask>>16) out.push_back((SPD_KOFF_HI<<16)|(mask>>16));
+        packets++;
+      }
+      out.push_back((unsigned int)SPD_PKT_END_PATTERN<<24);
+      packets++;
+      streams.push_back(out);
     }
-    std::vector<std::pair<long,std::vector<unsigned int>>> cand;
-    for (auto& u: uses) {
-      long save=(long)u.second*(long)(u.first.size()-1)-(long)(u.first.size()+2);
-      if (save>0) cand.push_back(std::make_pair(save,u.first));
-    }
-    std::sort(cand.begin(),cand.end(),[](const std::pair<long,std::vector<unsigned int>>& x, const std::pair<long,std::vector<unsigned int>>& y) {
-      return x.first>y.first || (x.first==y.first && x.second<y.second);
-    });
-    std::map<std::vector<unsigned int>,unsigned int> index;
-    for (auto& c: cand) {
-      if (macroDefs.size()>=SPD_MAX_MACROS) break;
-      index[c.second]=(unsigned int)macroDefs.size();
-      macroDefs.push_back(c.second);
-    }
-    if (!macroDefs.empty()) {
-      for (std::vector<unsigned int>& s: streams) {
-        std::vector<unsigned int> o;
+
+    // macros (0x13): a run of consecutive writes to one voice inside a register write packet,
+    // seen often enough, is defined once (voice 0 relative) and invoked as one 0xF000|index
+    // word. only whole consecutive runs are replaced, so the SPU sees the same writes in the
+    // same order.
+    std::vector<std::vector<unsigned int>> macroDefs;
+    {
+      auto forEachRun=[&](std::vector<unsigned int>& s, const std::function<void(size_t,size_t)>& f) {
         size_t i=0;
         while (i<s.size()) {
           unsigned int type=s[i]>>24, len=s[i]&0xffffff;
-          if (type!=SPD_PKT_REG_WRITE) {
-            o.insert(o.end(),s.begin()+i,s.begin()+i+1+len);
-            i+=1+len;
-            continue;
-          }
-          std::vector<unsigned int> payload(s.begin()+i+1,s.begin()+i+1+len);
-          std::vector<unsigned int> np;
-          std::vector<std::pair<size_t,size_t>> runs;
-          std::vector<unsigned int> one(s.begin()+i,s.begin()+i+1+len);
-          forEachRun(one,[&](size_t a, size_t b) { runs.push_back(std::make_pair(a-1,b-1)); });
-          size_t r=0;
-          for (size_t j=0; j<payload.size();) {
-            if (r<runs.size() && runs[r].first==j) {
-              std::vector<unsigned int> k=keyOf(payload,runs[r].first,runs[r].second);
-              auto it=index.find(k);
-              if (it!=index.end()) {
-                np.push_back(((0xf000U|it->second)<<16)|((payload[j]>>16)>>4));
-              } else {
-                np.insert(np.end(),payload.begin()+runs[r].first,payload.begin()+runs[r].second);
-              }
-              j=runs[r].second;
-              r++;
-              continue;
+          if (type==SPD_PKT_REG_WRITE) {
+            size_t a=i+1, e=i+1+len;
+            while (a<e) {
+              unsigned int off=s[a]>>16;
+              if (off>=0x180) { a++; continue; }
+              size_t b=a+1;
+              while (b<e && b-a<SPD_MAX_MACRO_WRITES && (s[b]>>16)<0x180 && ((s[b]>>16)>>4)==(off>>4)) b++;
+              if (b-a>=2) f(a,b);
+              a=b;
             }
-            np.push_back(payload[j]);
-            j++;
           }
-          o.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|(unsigned int)np.size());
-          o.insert(o.end(),np.begin(),np.end());
           i+=1+len;
         }
-        s=o;
+      };
+      auto keyOf=[](const std::vector<unsigned int>& s, size_t a, size_t b) {
+        std::vector<unsigned int> k;
+        for (size_t j=a; j<b; j++) k.push_back((((s[j]>>16)&0xf)<<16)|(s[j]&0xffff));
+        return k;
+      };
+      std::map<std::vector<unsigned int>,size_t> uses;
+      for (std::vector<unsigned int>& s: streams) {
+        forEachRun(s,[&](size_t a, size_t b) { uses[keyOf(s,a,b)]++; });
+      }
+      std::vector<std::pair<long,std::vector<unsigned int>>> cand;
+      for (auto& u: uses) {
+        long save=(long)u.second*(long)(u.first.size()-1)-(long)(u.first.size()+2);
+        if (save>0) cand.push_back(std::make_pair(save,u.first));
+      }
+      std::sort(cand.begin(),cand.end(),[](const std::pair<long,std::vector<unsigned int>>& x, const std::pair<long,std::vector<unsigned int>>& y) {
+        return x.first>y.first || (x.first==y.first && x.second<y.second);
+      });
+      std::map<std::vector<unsigned int>,unsigned int> index;
+      for (auto& c: cand) {
+        if (macroDefs.size()>=SPD_MAX_MACROS) break;
+        index[c.second]=(unsigned int)macroDefs.size();
+        macroDefs.push_back(c.second);
+      }
+      if (!macroDefs.empty()) {
+        for (std::vector<unsigned int>& s: streams) {
+          std::vector<unsigned int> o;
+          size_t i=0;
+          while (i<s.size()) {
+            unsigned int type=s[i]>>24, len=s[i]&0xffffff;
+            if (type!=SPD_PKT_REG_WRITE) {
+              o.insert(o.end(),s.begin()+i,s.begin()+i+1+len);
+              i+=1+len;
+              continue;
+            }
+            std::vector<unsigned int> payload(s.begin()+i+1,s.begin()+i+1+len);
+            std::vector<unsigned int> np;
+            std::vector<std::pair<size_t,size_t>> runs;
+            std::vector<unsigned int> one(s.begin()+i,s.begin()+i+1+len);
+            forEachRun(one,[&](size_t a, size_t b) { runs.push_back(std::make_pair(a-1,b-1)); });
+            size_t r=0;
+            for (size_t j=0; j<payload.size();) {
+              if (r<runs.size() && runs[r].first==j) {
+                std::vector<unsigned int> k=keyOf(payload,runs[r].first,runs[r].second);
+                auto it=index.find(k);
+                if (it!=index.end()) {
+                  np.push_back(((0xf000U|it->second)<<16)|((payload[j]>>16)>>4));
+                } else {
+                  np.insert(np.end(),payload.begin()+runs[r].first,payload.begin()+runs[r].second);
+                }
+                j=runs[r].second;
+                r++;
+                continue;
+              }
+              np.push_back(payload[j]);
+              j++;
+            }
+            o.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|(unsigned int)np.size());
+            o.insert(o.end(),np.begin(),np.end());
+            i+=1+len;
+          }
+          s=o;
+        }
       }
     }
-  }
 
-  // identical streams share one pattern; the order table carries the playback order. only
-  // when the tick rate never changes, since a stream's rate packets are relative to the rate
-  // it is entered with.
-  std::vector<unsigned int> orderPat;
-  {
-    bool rateMoves=false;
-    for (SPDPattern& p: pats) for (SPDTick& t: p.ticks) if (t.rate!=initRate) rateMoves=true;
-    std::vector<std::vector<unsigned int>> uniq;
-    std::map<std::vector<unsigned int>,unsigned int> seen;
-    for (std::vector<unsigned int>& s: streams) {
-      auto it=rateMoves?seen.end():seen.find(s);
-      if (it!=seen.end()) {
-        orderPat.push_back(it->second);
-      } else {
-        unsigned int idx=(unsigned int)uniq.size();
-        if (!rateMoves) seen[s]=idx;
-        uniq.push_back(s);
-        orderPat.push_back(idx);
+    // identical streams share one pattern; the order table carries the playback order. only
+    // when the tick rate never changes, since a stream's rate packets are relative to the rate
+    // it is entered with.
+    std::vector<unsigned int> orderPat;
+    {
+      bool rateMoves=false;
+      for (SPDPattern& p: pats) {
+        for (SPDTick& t: p.ticks) if (t.rate!=initRate) rateMoves=true;
+        if (p.fixupRate) rateMoves=true;
+      }
+      std::vector<std::vector<unsigned int>> uniq;
+      std::map<std::vector<unsigned int>,unsigned int> seen;
+      for (std::vector<unsigned int>& s: streams) {
+        auto it=rateMoves?seen.end():seen.find(s);
+        if (it!=seen.end()) {
+          orderPat.push_back(it->second);
+        } else {
+          unsigned int idx=(unsigned int)uniq.size();
+          if (!rateMoves) seen[s]=idx;
+          uniq.push_back(s);
+          orderPat.push_back(idx);
+        }
+      }
+      streams=uniq;
+      packets=0;
+      for (std::vector<unsigned int>& s: streams) {
+        for (size_t i=0; i<s.size(); i+=1+(s[i]&0xffffff)) packets++;
       }
     }
-    streams=uniq;
-    packets=0;
-    for (std::vector<unsigned int>& s: streams) {
-      for (size_t i=0; i<s.size(); i+=1+(s[i]&0xffffff)) packets++;
-    }
-  }
 
-  // song file
-  SafeWriter* w=new SafeWriter;
-  w->init();
-  writeMagic(w);
-  size_t headerPackets=0;
-  if (!e->song.name.empty()) {
-    writeString(w,SPD_PKT_TITLE,e->song.name);
+    // song file
+    SafeWriter* w=new SafeWriter;
+    w->init();
+    writeMagic(w);
+    size_t headerPackets=0;
+    if (!e->song.name.empty()) {
+      writeString(w,SPD_PKT_TITLE,e->song.name);
+      headerPackets++;
+    }
+    if (!e->song.author.empty()) {
+      writeString(w,SPD_PKT_AUTHOR,e->song.author);
+      headerPackets++;
+    }
+    writeString(w,SPD_PKT_COMMENT,"Furnace " DIV_VERSION " SPUDUMP export");
+    writeWord(w,SPD_PKT_TICK_RATE,initRate);
+    writeWord(w,SPD_PKT_VOICE_COUNT,(unsigned int)voiceCount);
+    headerPackets+=3;
+    for (size_t i=0; i<macroDefs.size(); i++) {
+      writeHeader(w,SPD_PKT_MACRO_DEF,1+(unsigned int)macroDefs[i].size());
+      w->writeI((unsigned int)i);
+      for (unsigned int m: macroDefs[i]) w->writeI(m);
+      headerPackets++;
+    }
+    writeHeader(w,SPD_PKT_ORDER_TABLE,2+(unsigned int)orderPat.size());
+    w->writeI(loop?1:0);
+    w->writeI(loop?(unsigned int)loopPat:0);
+    for (unsigned int o: orderPat) w->writeI(o);
     headerPackets++;
-  }
-  if (!e->song.author.empty()) {
-    writeString(w,SPD_PKT_AUTHOR,e->song.author);
-    headerPackets++;
-  }
-  writeString(w,SPD_PKT_COMMENT,"Furnace " DIV_VERSION " SPUDUMP export");
-  writeWord(w,SPD_PKT_TICK_RATE,initRate);
-  writeWord(w,SPD_PKT_VOICE_COUNT,(unsigned int)voiceCount);
-  headerPackets+=3;
-  for (size_t i=0; i<macroDefs.size(); i++) {
-    writeHeader(w,SPD_PKT_MACRO_DEF,1+(unsigned int)macroDefs[i].size());
-    w->writeI((unsigned int)i);
-    for (unsigned int m: macroDefs[i]) w->writeI(m);
-    headerPackets++;
-  }
-  writeHeader(w,SPD_PKT_ORDER_TABLE,2+(unsigned int)orderPat.size());
-  w->writeI(loop?1:0);
-  w->writeI(loop?(unsigned int)loopPat:0);
-  for (unsigned int o: orderPat) w->writeI(o);
-  headerPackets++;
-  size_t hdrPos=w->tell();
-  size_t streamPos=hdrPos+streams.size()*8;
-  for (size_t i=0; i<streams.size(); i++) {
-    writeHeader(w,SPD_PKT_PATTERN_HDR,1);
-    w->writeI((unsigned int)streamPos);
-    streamPos+=streams[i].size()*4;
-  }
-  headerPackets+=streams.size();
-  for (std::vector<unsigned int>& s: streams) {
-    for (unsigned int i: s) w->writeI(i);
-  }
+    size_t hdrPos=w->tell();
+    size_t streamPos=hdrPos+streams.size()*8;
+    for (size_t i=0; i<streams.size(); i++) {
+      writeHeader(w,SPD_PKT_PATTERN_HDR,1);
+      w->writeI((unsigned int)streamPos);
+      streamPos+=streams[i].size()*4;
+    }
+    headerPackets+=streams.size();
+    for (std::vector<unsigned int>& s: streams) {
+      for (unsigned int i: s) w->writeI(i);
+    }
+    SPDSong song;
+    song.w=w;
+    song.orders=(int)orderPat.size();
+    song.patterns=(int)streams.size();
+    song.macros=(int)macroDefs.size();
+    song.packets=headerPackets+packets;
+    return song;
+  };
 
   // sample bank file
   SafeWriter* wb=new SafeWriter;
@@ -659,8 +716,116 @@ void DivExportSPUDump::run() {
     bankPackets++;
   }
 
-  logAppendf("%d orders, %d patterns (loop to %d), %d macros, %d ticks, %d voices",(int)orderPat.size(),(int)streams.size(),loop?loopPat:-1,(int)macroDefs.size(),(int)totalTicks,voiceCount);
-  logAppendf("out.spudump: %d bytes, %d packets",(int)w->size(),(int)(headerPackets+packets));
+  // the loop encoding. default: the loop-back patterns above. compact: pass 1 only, plus one
+  // fix-up pattern at the loop point that puts back the register state pass 1 entered the loop
+  // target with, then loops to the target. the fix-up cannot bring back what the registers do
+  // not hold (a voice still sounding at the loop point), so the compact encoding is kept only
+  // when the vendored core renders the second pass of both sample for sample alike.
+  SPDSong song=writeSong(pats,loopPat);
+  if (loop && appended>0) {
+    std::vector<SPDPattern> cpats(pats.begin(),pats.begin()+pass1Len);
+    // registers the target's snapshot or first tick write are restored by the target itself;
+    // the fix-up writes the ones pass 1 first set later, with the value SPD_LoadEx left in them
+    SPDRegState st;
+    for (int i=0; i<loopPat1; i++) spdEffective(cpats[i],st);
+    unsigned int entryRate=(loopPat1>0)?cpats[loopPat1-1].ticks.back().rate:initRate;
+    SPDRegState entry=st;
+    for (unsigned int w: cpats[loopPat1].snapshot) entry.set[(w>>16)>>1]=true;
+    for (unsigned int w: cpats[loopPat1].ticks[0].words) {
+      if (snapshotReg(w>>16)) entry.set[(w>>16)>>1]=true;
+    }
+    for (size_t i=(size_t)loopPat1; i<cpats.size(); i++) spdEffective(cpats[i],st);
+    SPDPattern f;
+    f.order=cpats.back().order;
+    f.fixup=true;
+    if (cpats.back().ticks.back().rate!=entryRate) f.fixupRate=entryRate;
+    int unknown=0;
+    auto add=[&](unsigned int r) {
+      if (!st.set[r>>1] || entry.set[r>>1]) return;
+      unsigned short val;
+      if (!spdInitValue(r,val)) {
+        unknown++;
+        return;
+      }
+      if (st.v[r>>1]!=val) f.snapshot.push_back((r<<16)|val);
+    };
+    add(0x1a2);
+    for (unsigned int r=0x1c0; r<0x200; r+=2) add(r);
+    for (unsigned int r=0x180; r<0x1c0; r+=2) {
+      if (r==0x1a2 || r==0x1aa || !snapshotReg(r)) continue;
+      add(r);
+    }
+    add(0x1aa);
+    for (unsigned int r=0; r<0x180; r+=2) if (snapshotReg(r)) add(r);
+    if (!f.snapshot.empty() || f.fixupRate) cpats.push_back(f);
+    if (unknown) {
+      logAppendf("loop: default encoding (%d loop-back patterns); compact: %d registers set after the loop target have no known initial value",(int)appended,unknown);
+    } else {
+      SPDSong alt=writeSong(cpats,loopPat1);
+      // replay both through pass 2: pass 1, then the loop target to the end once more
+      size_t ticks1=0, ticks2=0;
+      for (size_t i=0; i<pass1Len; i++) ticks1+=pats[i].ticks.size();
+      for (size_t i=(size_t)loopPat1; i<pass1Len; i++) ticks2+=pats[i].ticks.size();
+      // pass 1 is rendered but not kept: both encodings write the same there. one replay after
+      // the other, with the engine held: the core keeps its reverb resampling history in
+      // globals (spu/reverb.cc), so two cores must not render interleaved.
+      auto render=[&](SafeWriter* sw, std::vector<short>& out, std::vector<size_t>& tickFrame) {
+        PS1SPUBridge spu;
+        SPDPlayer pl;
+        pl.spu=&spu;
+        pl.masterVolume=0x3fff;
+        if (!pl.LoadEx(sw->getFinalBuf(),sw->size(),wb->getFinalBuf(),wb->size())) return false;
+        spdReplay(pl,spu,ticks1+ticks2,NULL,out,&tickFrame,ticks1);
+        return true;
+      };
+      std::vector<short> outDef, outAlt;
+      std::vector<size_t> frameDef, frameAlt;
+      bool okDef=false, okAlt=false;
+      e->synchronizedSoft([&]() {
+        okDef=render(song.w,outDef,frameDef);
+        okAlt=render(alt.w,outAlt,frameAlt);
+      });
+      bool same=(okDef && okAlt && outDef.size()==outAlt.size() && frameDef==frameAlt);
+      size_t diffAt=0;
+      if (same) {
+        for (size_t i=0; i<outDef.size(); i++) {
+          if (outDef[i]!=outAlt[i]) {
+            same=false;
+            diffAt=i/2;
+            break;
+          }
+        }
+      }
+      if (same && alt.w->size()<song.w->size()) {
+        logAppendf("loop: compact encoding (%d bytes; default with %d loop-back patterns: %d bytes): pass 2 replays sample-identical, %d fix-up writes%s",
+          (int)alt.w->size(),(int)appended,(int)song.w->size(),(int)f.snapshot.size(),f.fixupRate?" and the tick rate":"");
+        delete song.w;
+        song=alt;
+        loopPat=loopPat1;
+      } else {
+        if (same) {
+          logAppendf("loop: default encoding (%d loop-back patterns, %d bytes); compact replays alike but is not smaller (%d bytes)",(int)appended,(int)song.w->size(),(int)alt.w->size());
+        } else if (!(okDef && okAlt)) {
+          logAppendf("loop: default encoding (%d loop-back patterns, %d bytes); compact could not be replayed",(int)appended,(int)song.w->size());
+        } else {
+          size_t tick=std::upper_bound(frameDef.begin(),frameDef.end(),diffAt)-frameDef.begin();
+          logAppendf("loop: default encoding (%d loop-back patterns, %d bytes); compact (%d bytes) replays differently in pass 2 from its tick %d",
+            (int)appended,(int)song.w->size(),(int)alt.w->size(),(int)(tick>0?tick-1:0));
+        }
+        delete alt.w;
+      }
+    }
+  } else if (loop && pats2.empty()) {
+    logAppend("loop: the song stops before it loops");
+  } else if (loop) {
+    logAppend("loop: no loop-back patterns; the first pass loops into itself");
+  }
+  if (song.orders>SPD_MAX_PATTERNS) {
+    logAppendf("WARNING: %d patterns; spdplayer plays at most %d",song.orders,SPD_MAX_PATTERNS);
+  }
+  SafeWriter* w=song.w;
+  logAppendf("%d orders, %d patterns (loop to %d), %d macros, %d ticks, %d voices",song.orders,song.patterns,loop?loopPat:-1,song.macros,(int)totalTicks,voiceCount);
+  logAppendf("out.spudump: %d bytes, %d packets",(int)w->size(),(int)song.packets);
   logAppendf("out.spubank: %d bytes, %d packets",(int)wb->size(),(int)bankPackets);
   progress[0].amount=1.0f;
   logAppend("finished!");

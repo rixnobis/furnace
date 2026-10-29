@@ -1,6 +1,5 @@
 // Ours. SPUDUMP self-consistency harness for the PS1 SPUDUMP ROM export.
-// A host port of nugget's spdplayer (spdplayer/spdplayer.c: parsePackets, loadInternal,
-// SPD_Poll, applyRegWrites, SPUInit/SPUResetVoice/SPUUpload) drives a fresh PS1SPUBridge
+// A host port of nugget's spdplayer (spd_player.h) drives a fresh PS1SPUBridge
 // (the vendored pcsx-redux core) from the exported out.spudump/out.spubank, bypassing
 // Furnace's engine; its output is compared against Furnace driving the same core.
 // usage:
@@ -24,6 +23,7 @@
 #include <vector>
 #include "../../../engine.h"
 #include "../../ps1.h"
+#include "spd_player.h"
 
 void reportError(String what) {
   logE("%s",what);
@@ -40,259 +40,6 @@ static bool readFile(const char* path, std::vector<unsigned char>& out) {
   fclose(f);
   return ok;
 }
-
-// samples (interleaved stereo) between ticks: DivEngine::nextTick's cycles/clockDrift rule.
-struct TickClock {
-  double drift=0;
-  int next(double rate, double divider) {
-    int cycles=(int)(rate/divider);
-    drift+=fmod(rate,divider);
-    if (drift>=divider) {
-      drift-=divider;
-      cycles++;
-    }
-    return cycles;
-  }
-};
-
-// ---- host port of spdplayer.c ----
-struct SPDWriteLog {
-  unsigned int tick;
-  unsigned short off, val;
-};
-
-struct SPDPlayer {
-  // spdplayer.c limits
-  static const unsigned MAX_ORDERS=256, MAX_PATTERNS=256, MAX_SAMPLES=128, MAX_MACROS=256, MAX_MACRO_WRITES=8;
-  PS1SPUBridge* spu;
-  std::vector<SPDWriteLog> log;
-  unsigned int tickNow=0;
-  unsigned outOfRange=0;
-  std::map<int,unsigned> pktCount; // by type, every packet parsePackets walks (song file)
-  std::map<int,unsigned> bankPktCount;
-
-  unsigned VoiceCount=24, OrderCount=0, CurrentOrder=0, PatternCount=0, SampleCount=0;
-  const unsigned char* fileBase=NULL;
-  size_t fileSize=0;
-  long stream=-1; // word index into the file, -1 = NULL
-  unsigned int waitRemaining=0;
-  unsigned int masterVolume=0x3800;
-  unsigned short orderTable[MAX_ORDERS];
-  unsigned int orderFlags=0, orderLoopTarget=0;
-  unsigned int patternOffsets[MAX_PATTERNS];
-  struct { unsigned short spuAddr, length, loopAddr, flags; } samples[MAX_SAMPLES];
-  struct { unsigned short off[MAX_MACRO_WRITES], val[MAX_MACRO_WRITES]; unsigned char n; } macros[MAX_MACROS];
-  unsigned macroCount=0;
-  unsigned int tickRateFP=50<<16;
-  size_t loadWrites=0;
-  bool wrapped=false; // advanceOrder looped back
-  bool stopped=false;
-  // bank uploads: (byte address, length incl. DMA rounding)
-  std::vector<std::pair<unsigned,unsigned>> uploads;
-
-  unsigned int word(const unsigned char* base, size_t idx) {
-    const unsigned char* p=base+idx*4;
-    return p[0]|(p[1]<<8)|(p[2]<<16)|((unsigned int)p[3]<<24);
-  }
-  void reg(unsigned int off, unsigned short val) {
-    // spuBase[offset/2] = value, spuBase = 1F801C00h
-    off&=~1U;
-    if (off>=0x200) {
-      outOfRange++;
-      return;
-    }
-    log.push_back({tickNow,(unsigned short)off,val});
-    spu->writeReg(0xc00+off,val);
-  }
-  void SPUInit() {
-    reg(0x180,masterVolume);
-    reg(0x182,masterVolume);
-    reg(0x1aa,0);
-    reg(0x188,0); reg(0x18a,0);
-    reg(0x18c,0xffff); reg(0x18e,0xffff);
-    reg(0x1ac,4);
-    reg(0x1b0,0); reg(0x1b2,0);
-    reg(0x190,0); reg(0x192,0);
-    reg(0x194,0); reg(0x196,0);
-    reg(0x198,0); reg(0x19a,0);
-    reg(0x1b4,0); reg(0x1b6,0);
-    reg(0x1aa,0x8000);
-  }
-  void SPUResetVoice(int v) {
-    unsigned int b=v*16;
-    reg(b+0x0,0); reg(b+0x2,0); reg(b+0x4,0); reg(b+0x6,0);
-    reg(b+0x8,0x000f); reg(b+0xc,0); reg(b+0xe,0); reg(b+0xa,0);
-  }
-  // DMA in 64-byte blocks: ceil(size/64) blocks from data (bytes past the buffer read as 0),
-  // SPU transfer address wrapping at the end of RAM.
-  void SPUUpload(unsigned int spuAddr, const unsigned char* buf, size_t bufLen, size_t at, unsigned int size) {
-    unsigned int blocks=size>>6;
-    if (size&0x3f) blocks++;
-    unsigned int total=blocks*64;
-    std::vector<unsigned char> data(total,0);
-    for (unsigned int i=0; i<total; i++) if (at+i<bufLen) data[i]=buf[at+i];
-    uploads.push_back({spuAddr,total});
-    unsigned int a=spuAddr&(PS1SPUBridge::RAM_SIZE-1);
-    unsigned int done=0;
-    while (done<total) {
-      unsigned int n=MIN(total-done,PS1SPUBridge::RAM_SIZE-a);
-      spu->writeRAM(a,data.data()+done,n);
-      done+=n;
-      a=0;
-    }
-  }
-  void parsePackets(const unsigned char* base, size_t size, bool skipSamples, std::map<int,unsigned>& counts) {
-    size_t ptr=4, end=size/4;
-    while (ptr<end) {
-      unsigned int header=word(base,ptr);
-      unsigned int type=header>>24, len=header&0xffffff;
-      size_t payload=ptr+1;
-      counts[type]++;
-      switch (type) {
-        case 0x10:
-          if (len>=2) {
-            orderFlags=word(base,payload);
-            orderLoopTarget=word(base,payload+1);
-            OrderCount=len-2;
-            if (OrderCount>MAX_ORDERS) OrderCount=MAX_ORDERS;
-            for (unsigned i=0; i<OrderCount; i++) orderTable[i]=word(base,payload+2+i)&0xffff;
-          }
-          break;
-        case 0x11:
-          if (len>=1 && PatternCount<MAX_PATTERNS) patternOffsets[PatternCount++]=word(base,payload);
-          break;
-        case 0x13:
-          if (len>=2) {
-            unsigned idx=word(base,payload)&0xffff;
-            if (idx<MAX_MACROS) {
-              unsigned n=MIN(len-1,MAX_MACRO_WRITES);
-              macros[idx].n=n;
-              for (unsigned j=0; j<n; j++) {
-                unsigned int w=word(base,payload+1+j);
-                macros[idx].off[j]=w>>16;
-                macros[idx].val[j]=w&0xffff;
-              }
-              if (idx>=macroCount) macroCount=idx+1;
-            }
-          }
-          break;
-        case 0x20:
-          if (len>=1) {
-            SampleCount=MIN(word(base,payload),MAX_SAMPLES);
-            for (unsigned i=0; i<SampleCount; i++) {
-              unsigned int w0=word(base,payload+1+i*2), w1=word(base,payload+2+i*2);
-              samples[i].spuAddr=w0>>16; samples[i].length=w0&0xffff;
-              samples[i].loopAddr=w1>>16; samples[i].flags=w1&0xffff;
-            }
-          }
-          break;
-        case 0x21:
-          if (!skipSamples && len>=1) {
-            SPUUpload(word(base,payload)*8,base,size,(payload+1)*4,(len-1)*4);
-          }
-          break;
-        case 0x30:
-          if (len>=1) tickRateFP=word(base,payload);
-          break;
-        case 0x45:
-          if (len>=1) VoiceCount=MIN(word(base,payload),24U);
-          break;
-        default:
-          break;
-      }
-      ptr=payload+len;
-    }
-  }
-  unsigned LoadEx(const unsigned char* data, size_t size, const unsigned char* sampleData, size_t sampleSize) {
-    static const char magic[16]={'P','S','X','S','P','U','D','U','M','P','v','1','r','1',0,0};
-    if (size<16 || memcmp(data,magic,16)!=0) return 0;
-    SPUInit();
-    fileBase=data; fileSize=size;
-    if (sampleData && sampleSize>16) {
-      if (memcmp(sampleData,magic,16)==0) parsePackets(sampleData,sampleSize,false,bankPktCount);
-      parsePackets(data,size,true,pktCount);
-    } else {
-      parsePackets(data,size,false,pktCount);
-    }
-    for (int i=0; i<24; i++) SPUResetVoice(i);
-    reg(0x1aa,0xc000); // SPUUnMute
-    loadWrites=log.size();
-    if (OrderCount>0 && PatternCount>0) {
-      CurrentOrder=0;
-      if (orderTable[0]<PatternCount) stream=patternOffsets[orderTable[0]]/4;
-    }
-    return VoiceCount;
-  }
-  void applyMacro(unsigned idx, unsigned voice) {
-    if (idx>=macroCount) return;
-    for (unsigned i=0; i<macros[idx].n; i++) reg((unsigned short)(macros[idx].off[i]+voice*0x10),macros[idx].val[i]);
-  }
-  unsigned int applyRegWrites(size_t payload, unsigned int count) {
-    unsigned int waitAccum=0;
-    for (unsigned int i=0; i<count; i++) {
-      unsigned int w=word(fileBase,payload+i);
-      unsigned short off=w>>16, val=w&0xffff;
-      if (off==0xefff) waitAccum+=val;
-      else if (off>=0xf000) applyMacro(off&0x0fff,val);
-      else reg(off,val);
-    }
-    return waitAccum;
-  }
-  void advanceOrder() {
-    CurrentOrder++;
-    if (CurrentOrder>=OrderCount) {
-      wrapped=true;
-      if (orderFlags&1) {
-        CurrentOrder=orderLoopTarget;
-      } else {
-        CurrentOrder=OrderCount-1;
-        stream=-1;
-        return;
-      }
-    }
-    unsigned short pat=orderTable[CurrentOrder];
-    stream=(pat<PatternCount)?(long)(patternOffsets[pat]/4):-1;
-  }
-  void Poll() {
-    if (waitRemaining>0) {
-      waitRemaining--;
-      return;
-    }
-    if (stream<0) return;
-    while (true) {
-      if ((size_t)stream>=fileSize/4) { stream=-1; return; } // (the player would run off)
-      unsigned int header=word(fileBase,stream);
-      unsigned int type=header>>24, len=header&0xffffff;
-      size_t payload=stream+1;
-      switch (type) {
-        case 0x00: {
-          unsigned int w=applyRegWrites(payload,len);
-          if (w>0) {
-            waitRemaining=w;
-            stream=payload+len;
-            return;
-          }
-          break;
-        }
-        case 0x01:
-          if (len>=1) waitRemaining=word(fileBase,payload);
-          stream=payload+len;
-          return;
-        case 0x02:
-          stream=payload+len;
-          advanceOrder();
-          if (stream<0) return;
-          continue;
-        case 0x30:
-          if (len>=1) tickRateFP=word(fileBase,payload);
-          break;
-        default:
-          break;
-      }
-      stream=payload+len;
-    }
-  }
-};
 
 struct Cmp {
   size_t n=0, diffs=0, first=(size_t)-1;
@@ -372,6 +119,8 @@ class DivPS1SPDHarness {
   public:
   // the engine driving the core, one tick at a time: raw core output and the tick spacing
   static double divider;
+  // first tick of each pass
+  static std::vector<size_t> passStart;
   // passes: how many times through the song (2 = the loop-back pass as well)
   static bool reference(DivEngine& e, std::vector<short>& out, std::vector<int>& tickLen, int passes=1) {
     DivDispatch* d=e.disCont[0].dispatch;
@@ -387,8 +136,13 @@ class DivPS1SPDHarness {
     divider=e.divider;
     std::vector<short> l, r;
     int ends=0;
+    passStart.clear();
+    passStart.push_back(0);
     while (true) {
-      if (e.nextTick() && ++ends>=passes) break;
+      if (e.nextTick()) {
+        if (++ends>=passes) break;
+        passStart.push_back(tickLen.size());
+      }
       if (!e.playing) break;
       int n=e.cycles;
       tickLen.push_back(n);
@@ -407,25 +161,7 @@ class DivPS1SPDHarness {
 };
 
 double DivPS1SPDHarness::divider=0;
-
-// replay: one poll per tick; tick spacing from the stream's tick rate (as the engine computes
-// it from a divider), or, if engineTicks is given, the engine's own spacing.
-static void replay(SPDPlayer& pl, PS1SPUBridge& spu, size_t ticks, const std::vector<int>* engineTicks, std::vector<short>& rep) {
-  std::vector<short> l, r;
-  TickClock clk;
-  for (size_t t=0; t<ticks; t++) {
-    pl.tickNow=(unsigned int)t;
-    pl.Poll();
-    int n=engineTicks?(*engineTicks)[t]:clk.next(PS1SPUBridge::RATE,(double)pl.tickRateFP/65536.0);
-    if (n<=0) continue;
-    l.resize(n); r.resize(n);
-    spu.render(l.data(),r.data(),n);
-    for (int i=0; i<n; i++) {
-      rep.push_back(l[i]);
-      rep.push_back(r[i]);
-    }
-  }
-}
+std::vector<size_t> DivPS1SPDHarness::passStart;
 
 // best lag (|lag|<=64 frames, left channel, first 10 s) and least-squares gain of a against b,
 // then the residual of b-g*a over the overlap.
@@ -503,7 +239,7 @@ static int checkArm(const char* furPath, const char* spdPath, const char* bankPa
   if (!pl.LoadEx(spd.data(),spd.size(),bank.data(),bank.size())) { printf("SPD_LoadEx failed\n"); return 1; }
   std::vector<short> rep;
   size_t ticks=tickLen.size();
-  replay(pl,spu,ticks,NULL,rep);
+  spdReplay(pl,spu,ticks,NULL,rep);
   double spt=PS1SPUBridge::RATE/((double)pl.tickRateFP/65536.0);
 
   printf("%s\n",furPath);
@@ -532,6 +268,58 @@ static int checkArm(const char* furPath, const char* spdPath, const char* bankPa
     tickMismatch,ticks,DivPS1SPDHarness::divider,pl.tickRateFP,pl.tickRateFP/65536.0);
   printf("  lengths: replay %zu frames, reference %zu frames\n",rep.size()/2,ref.size()/2);
   printCmp("replay vs engine reference (raw core)",compare(rep,ref),spt);
+  if (DivPS1SPDHarness::passStart.size()>1) {
+    // each pass on its own: frames from the pass's first tick to the next pass's
+    std::vector<size_t> startFrame;
+    size_t fr=0;
+    for (size_t t=0, k=0; t<=ticks; t++) {
+      while (k<DivPS1SPDHarness::passStart.size() && DivPS1SPDHarness::passStart[k]==t) {
+        startFrame.push_back(fr);
+        k++;
+      }
+      if (t<ticks) fr+=MAX(0,tickLen[t]);
+    }
+    startFrame.push_back(fr);
+    for (size_t k=0; k+1<startFrame.size(); k++) {
+      size_t a=startFrame[k]*2, b=MIN(startFrame[k+1]*2,MIN(rep.size(),ref.size()));
+      if (a>=b) continue;
+      std::vector<short> ra(rep.begin()+a,rep.begin()+b), rb(ref.begin()+a,ref.begin()+b);
+      Cmp c=compare(ra,rb);
+      String tag=fmt::sprintf("pass %d (ticks from %zu, frames from %zu)",(int)k+1,DivPS1SPDHarness::passStart[k],startFrame[k]);
+      printCmp(tag.c_str(),c,spt);
+      if (c.diffs) {
+        // the tick holding the first differing frame, relative to the pass, and frame counts
+        size_t ff=startFrame[k]+c.first/2, acc=0, tk=0;
+        for (tk=0; tk<ticks; tk++) {
+          if (acc+MAX(0,tickLen[tk])>ff) break;
+          acc+=MAX(0,tickLen[tk]);
+        }
+        size_t frames=0;
+        for (size_t i=0; i+1<ra.size(); i+=2) if (ra[i]!=rb[i] || ra[i+1]!=rb[i+1]) frames++;
+        printf("    %zu differing frames of %zu; first differing frame %zu = pass tick %zu (absolute tick %zu)\n",
+          frames,ra.size()/2,c.first/2,tk-DivPS1SPDHarness::passStart[k],tk);
+        // SPD_DIFF_WINDOW=<ticks>: difference by window of that many ticks from the pass start
+        const char* winEnv=getenv("SPD_DIFF_WINDOW");
+        int win=winEnv?atoi(winEnv):0;
+        if (win>0) {
+          size_t t0=DivPS1SPDHarness::passStart[k], t1=(k+1<DivPS1SPDHarness::passStart.size())?DivPS1SPDHarness::passStart[k+1]:ticks;
+          size_t f0=0;
+          for (size_t t=t0; t<t1; t+=win) {
+            size_t n=0;
+            for (size_t u=t; u<MIN(t1,t+win); u++) n+=MAX(0,tickLen[u]);
+            if (f0+n>ra.size()/2) n=ra.size()/2-f0;
+            std::vector<short> wa(ra.begin()+f0*2,ra.begin()+(f0+n)*2), wb(rb.begin()+f0*2,rb.begin()+(f0+n)*2);
+            Cmp cw=compare(wa,wb);
+            size_t fd=0;
+            for (size_t i=0; i+1<wa.size(); i+=2) if (wa[i]!=wb[i] || wa[i+1]!=wb[i+1]) fd++;
+            printf("    ticks +%zu..+%zu: %zu/%zu frames differ, max %d, diff RMS %.2f, ref RMS %.2f, %.1f dB\n",t-t0,MIN(t1,t+win)-t0,fd,n,cw.maxDiff,cw.rmsDiff,cw.rmsRef,
+              (cw.rmsDiff>0 && cw.rmsRef>0)?20*log10(cw.rmsDiff/cw.rmsRef):-999.0);
+            f0+=n;
+          }
+        }
+      }
+    }
+  }
   if (tickMismatch) {
     // the same stream with the engine's tick spacing: isolates the 16.16 tick rate rounding
     PS1SPUBridge spu2;
@@ -540,7 +328,7 @@ static int checkArm(const char* furPath, const char* spdPath, const char* bankPa
     pl2.masterVolume=master;
     pl2.LoadEx(spd.data(),spd.size(),bank.data(),bank.size());
     std::vector<short> rep2;
-    replay(pl2,spu2,ticks,&tickLen,rep2);
+    spdReplay(pl2,spu2,ticks,&tickLen,rep2);
     printCmp("replay at the engine's tick spacing vs engine reference",compare(rep2,ref),spt);
   }
 
