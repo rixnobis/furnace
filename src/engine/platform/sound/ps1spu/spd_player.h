@@ -230,6 +230,9 @@ struct SPDPlayer {
       return;
     }
     if (stream<0) return;
+    // passing through more orders than the song has without a wait is a loop that never
+    // waits: the player stops rather than spin
+    unsigned int ordersWalked=0;
     while (true) {
       if ((size_t)stream>=fileSize/4) { stream=-1; return; } // (the player would run off)
       unsigned int header=word(fileBase,stream);
@@ -238,18 +241,23 @@ struct SPDPlayer {
       switch (type) {
         case 0x00: {
           unsigned int w=applyRegWrites(payload,len);
+          // the poll that read a wait is the first of its ticks; a wait of 0 is a no-op
           if (w>0) {
-            waitRemaining=w;
+            waitRemaining=w-1;
             stream=payload+len;
             return;
           }
           break;
         }
         case 0x01:
-          if (len>=1) waitRemaining=word(fileBase,payload);
-          stream=payload+len;
-          return;
+          if (len>=1 && word(fileBase,payload)>0) {
+            waitRemaining=word(fileBase,payload)-1;
+            stream=payload+len;
+            return;
+          }
+          break;
         case 0x02:
+          if (++ordersWalked>OrderCount) { stream=-1; return; }
           stream=payload+len;
           advanceOrder();
           if (stream<0) return;

@@ -23,8 +23,8 @@
 // behavior wins where the two differ:
 // - a register write packet's inline waits (0xEFFF) are summed and applied after the whole
 //   packet, so an inline wait is only ever placed at the end of a packet.
-// - a wait of N (packet or inline) holds for N+1 polls: the poll that read it plus N more.
-//   an inline wait of 0 does not stop the poll at all, so a 1-tick gap is a wait packet of 0.
+// - a wait of N>0 (packet or inline) holds for N polls: the poll that read it plus N-1 more.
+//   a wait of 0 is a no-op (the poll goes on to the next packet), so every gap is a wait of 1+.
 // - the loop point packet (0x03) is ignored; looping is the order table's loop flag and target.
 // layout: out.spudump is the stream (metadata, tick rate, voice count, order table, pattern
 // headers, pattern streams); out.spubank holds the sample directory and the sample data
@@ -164,26 +164,19 @@ static void emitBatch(std::vector<unsigned int>& out, std::vector<unsigned int>&
   if (d==0) d=1;
   if (words.empty()) {
     out.push_back(((unsigned int)SPD_PKT_WAIT<<24)|1);
-    out.push_back(d-1);
+    out.push_back(d);
     packets++;
     return;
   }
-  if (d>=2) {
-    unsigned int w=d-1;
-    while (w>0xffff) {
-      words.push_back((SPD_VREG_WAIT<<16)|0xffff);
-      w-=0xffff;
-    }
-    words.push_back((SPD_VREG_WAIT<<16)|w);
+  unsigned int w=d;
+  while (w>0xffff) {
+    words.push_back((SPD_VREG_WAIT<<16)|0xffff);
+    w-=0xffff;
   }
+  words.push_back((SPD_VREG_WAIT<<16)|w);
   out.push_back(((unsigned int)SPD_PKT_REG_WRITE<<24)|(unsigned int)words.size());
   out.insert(out.end(),words.begin(),words.end());
   packets++;
-  if (d==1) {
-    out.push_back(((unsigned int)SPD_PKT_WAIT<<24)|1);
-    out.push_back(0);
-    packets++;
-  }
 }
 
 // the replay's register state, as far as a write can be redundant: a write to a snapshot
