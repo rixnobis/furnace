@@ -19,9 +19,13 @@
 #     the player's own fine-tune formula; ADSR words copied from the tone
 #   - reverb flag = CC91 > 0 (the player's binary send)
 # usage: score2ps1.py <song.mid> <bank.vab> <outdir> <title> [--psm song.psm] [--names song]
+#        [--bank-order ref.mid] [--beats N]
+#   --bank-order: take the GM program -> VAB program order from the score the bank was made
+#     for, so a new score can play any subset of an existing bank's programs
+#   --beats: beats per bar (default 4); patterns are four bars, highlights at beat and bar
 #
 # song.txt lines:
-#   song <hz> <patLen> <rows> <speed> <lastRowSpeed> <rowsPerBeat> <title>
+#   song <hz> <patLen> <rows> <speed> <lastRowSpeed> <rowsPerBeat> <beatsPerBar> <title>
 #   sample <id> <c4rate> <loopStart|-1> <end> <name>   (loop/end as the block flags play it:
 #        loop end, or where a one-shot stops; the .adpcm may hold blocks past it)
 #   ins <id> <sample> <adsr1 hex> <adsr2 hex> <reverb 0/1> <name>
@@ -68,10 +72,16 @@ def main():
     a = sys.argv[1:]
     psm = None
     names = 'gm'
+    bank_order = None
+    beats = 4
     if '--psm' in a:
         i = a.index('--psm'); psm = a[i + 1]; del a[i:i + 2]
     if '--names' in a:
         i = a.index('--names'); names = a[i + 1]; del a[i:i + 2]
+    if '--bank-order' in a:
+        i = a.index('--bank-order'); bank_order = a[i + 1]; del a[i:i + 2]
+    if '--beats' in a:
+        i = a.index('--beats'); beats = int(a[i + 1]); del a[i:i + 2]
     mid, vabp, out, title = a
     os.makedirs(out, exist_ok=True)
     fmt, ppq, trks = P.read_smf(mid)
@@ -102,7 +112,11 @@ def main():
     # use; recover it from the order programs are first heard (drums are the kit program).
     order = []
     prog = [0] * 16
-    for tick, _, _, e in ev:
+    ref = ev
+    if bank_order:
+        ref = sorted((e[0], ti, k, e) for ti, t in enumerate(P.read_smf(bank_order)[2])
+                     for k, e in enumerate(t) if e[1] != 'meta')
+    for tick, _, _, e in ref:
         if e[1] == 0xc0:
             prog[e[2]] = e[3][0]
         elif e[1] == 0x90 and e[3][1] > 0:
@@ -239,7 +253,7 @@ def main():
     grid = ppq // 4 if g_on % (ppq // 4) == 0 else g_on
     rows = -(-endtick // grid)
     lastspeed = endtick - (rows - 1) * grid
-    patlen = 16 * ppq // grid  # four 4/4 bars per pattern
+    patlen = 4 * beats * ppq // grid  # four bars per pattern
     cells = [(c[0], c[1] // grid) + c[2:] + (c[1] % grid,) for c in cells]
     assert all(c[7] == 0 or c[2] == 'off' for c in cells)
     # per voice and row: at most one note-on and one key-off, and a key-off sharing a row
@@ -248,7 +262,7 @@ def main():
     assert max(kinds.values()) == 1
     assert all(not (c[2] == 'off' and c[7] == 0 and (c[0], c[1], False) in kinds) for c in cells)
     with open(os.path.join(out, 'song.txt'), 'w') as f:
-        f.write('song %.6f %d %d %d %d %d %s\n' % (hz, patlen, rows, grid, lastspeed, ppq // grid, title))
+        f.write('song %.6f %d %d %d %d %d %d %s\n' % (hz, patlen, rows, grid, lastspeed, ppq // grid, beats, title))
         for s in sinfo:
             f.write('sample %d %d %d %d %s\n' % s)
         for i in iinfo:
