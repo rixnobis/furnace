@@ -161,22 +161,22 @@ int main(int argc, char** argv) {
   e.createNew("id0=225\n","Sony PlayStation",false);
   if (reverbPreset>=0) e.song.systemFlags[0].set("reverbPreset",reverbPreset);
   DivSubSong* sub=e.song.subsong[0];
-  int patLen=0, rows=0, cells=0, speed=1, lastSpeed=1, perBeat=4;
+  int patLen=0, rows=0, cells=0, speed=1, lastSpeed=1, perBeat=4, perBar=4;
   char line[1024];
   while (fgets(line,sizeof(line),in)) {
     char kind[16];
     if (sscanf(line,"%15s",kind)!=1) continue;
     if (strcmp(kind,"song")==0) {
       double hz;
-      if (sscanf(line,"song %lf %d %d %d %d %d",&hz,&patLen,&rows,&speed,&lastSpeed,&perBeat)!=6 || patLen<1 || patLen>DIV_MAX_ROWS ||
-          speed<1 || speed>255 || lastSpeed<1 || lastSpeed>speed || perBeat<1 || perBeat>255) {
+      if (sscanf(line,"song %lf %d %d %d %d %d %d",&hz,&patLen,&rows,&speed,&lastSpeed,&perBeat,&perBar)!=7 || patLen<1 || patLen>DIV_MAX_ROWS ||
+          speed<1 || speed>255 || lastSpeed<1 || lastSpeed>speed || perBeat<1 || perBeat>255 || perBar<1 || perBeat*perBar>255) {
         fprintf(stderr,"bad song line\n"); return 1;
       }
       int pats=(rows+patLen-1)/patLen;
       if (pats>DIV_MAX_PATTERNS) {
         fprintf(stderr,"%d patterns do not fit\n",pats); return 1;
       }
-      e.song.name=restOf(line,7);
+      e.song.name=restOf(line,8);
       e.song.author="rixnobis";
       e.song.systemName="Sony PlayStation";
       sub->hz=(float)hz;
@@ -184,7 +184,7 @@ int main(int argc, char** argv) {
       sub->speeds.len=1;
       // highlights at the beat and the bar: the tracker shows 60*hz/(hilightA*speed) = the score's BPM.
       sub->hilightA=perBeat;
-      sub->hilightB=perBeat*4;
+      sub->hilightB=perBeat*perBar;
       sub->patLen=patLen;
       sub->ordersLen=pats;
       for (int ch=0; ch<e.getTotalChannelCount(); ch++) {
