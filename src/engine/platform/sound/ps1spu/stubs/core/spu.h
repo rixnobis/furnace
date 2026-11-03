@@ -1,5 +1,7 @@
 // Stands in for pcsx-redux core/spu.h: SPUInterface (same virtuals) plus a no-op Lua handle.
 #pragma once
+
+#include <memory>
 #include <stdint.h>
 #include <filesystem>
 #include "core/decode_xa.h"
@@ -16,6 +18,10 @@ struct Lua {  // stand-in for lua/luawrapper.h Lua: every call is a no-op
     void pop() {}
 };
 namespace PCSX {
+namespace SPU {
+class Overlay;
+}
+
 class SPUInterface {
   public:
     using json = nlohmann::json;
@@ -35,6 +41,8 @@ class SPUInterface {
     virtual void lockSPURAM() = 0;
     virtual void unlockSPURAM() = 0;
     virtual uint8_t *getSpuRam() = 0;
+    virtual void setOverlay(std::shared_ptr<const SPU::Overlay>) = 0;
+    virtual std::shared_ptr<const SPU::Overlay> getOverlay() = 0;
     static constexpr size_t c_spuRamSize = 512 * 1024;
     virtual uint32_t getTransferAddr() = 0;
     virtual void resetCaptureBuffer() = 0;
