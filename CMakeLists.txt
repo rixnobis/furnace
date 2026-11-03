@@ -970,12 +970,16 @@ ${PS1SPU_DIR}/spu/adsr.cc
 ${PS1SPU_DIR}/spu/dma.cc
 ${PS1SPU_DIR}/spu/interpolation.cc
 ${PS1SPU_DIR}/spu/noise.cc
+${PS1SPU_DIR}/spu/overlay.cc
 ${PS1SPU_DIR}/spu/registers.cc
 ${PS1SPU_DIR}/spu/reverb.cc
 ${PS1SPU_DIR}/spu/spu.cc
 ${PS1SPU_DIR}/spu/volume.cc
 ${PS1SPU_DIR}/spu/xa.cc
 ${PS1SPU_DIR}/supportpsx/adpcm.cc
+${PS1SPU_DIR}/supportpsx/sf2.cc
+${PS1SPU_DIR}/supportpsx/spusample.cc
+${PS1SPU_DIR}/support/md5.cc
 )
 set(PS1SPU_SOURCES
 ${PS1SPU_VENDORED_SOURCES}
