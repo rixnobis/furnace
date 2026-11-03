@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <thread>
 
 #define SPD_PKT_REG_WRITE 0x00
 #define SPD_PKT_WAIT 0x01
@@ -759,9 +760,8 @@ void DivExportSPUDump::run() {
       size_t ticks1=0, ticks2=0;
       for (size_t i=0; i<pass1Len; i++) ticks1+=pats[i].ticks.size();
       for (size_t i=(size_t)loopPat1; i<pass1Len; i++) ticks2+=pats[i].ticks.size();
-      // pass 1 is rendered but not kept: both encodings write the same there. one replay after
-      // the other, with the engine held: the core keeps its reverb resampling history in
-      // globals (spu/reverb.cc), so two cores must not render interleaved.
+      // pass 1 is rendered but not kept: both encodings write the same there. the two replays
+      // run at once on their own cores, one on a second thread, with the engine held.
       auto render=[&](SafeWriter* sw, std::vector<short>& out, std::vector<size_t>& tickFrame) {
         PS1SPUBridge spu;
         SPDPlayer pl;
@@ -775,8 +775,11 @@ void DivExportSPUDump::run() {
       std::vector<size_t> frameDef, frameAlt;
       bool okDef=false, okAlt=false;
       e->synchronizedSoft([&]() {
+        std::thread altThread([&]() {
+          okAlt=render(alt.w,outAlt,frameAlt);
+        });
         okDef=render(song.w,outDef,frameDef);
-        okAlt=render(alt.w,outAlt,frameAlt);
+        altThread.join();
       });
       bool same=(okDef && okAlt && outDef.size()==outAlt.size() && frameDef==frameAlt);
       size_t diffAt=0;
