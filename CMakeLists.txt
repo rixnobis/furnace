@@ -930,6 +930,7 @@ src/engine/export/zsm.cpp
 src/engine/export/ipod.cpp
 src/engine/export/grub.cpp
 src/engine/export/spudump.cpp
+src/engine/export/xm.cpp
 
 src/engine/effect/abstract.cpp
 src/engine/effect/dummy.cpp

@@ -26,6 +26,7 @@
 #include "export/ipod.h"
 #include "export/grub.h"
 #include "export/spudump.h"
+#include "export/xm.h"
 
 DivROMExport* DivEngine::buildROM(DivROMExportOptions sys) {
   DivROMExport* exporter=NULL;
@@ -50,6 +51,9 @@ DivROMExport* DivEngine::buildROM(DivROMExportOptions sys) {
       break;
     case DIV_ROM_SPUDUMP:
       exporter=new DivExportSPUDump;
+      break;
+    case DIV_ROM_XM_PS1:
+      exporter=new DivExportXM;
       break;
     default:
       exporter=new DivROMExport;

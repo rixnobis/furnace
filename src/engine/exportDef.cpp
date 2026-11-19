@@ -154,4 +154,16 @@ void DivEngine::registerROMExports() {
     },
     true, DIV_REQPOL_EXACT
   );
+
+  romExportDefs[DIV_ROM_XM_PS1]=new DivROMExportDef(
+    "PlayStation XM (plain)", "Rix",
+    "FastTracker 2 module for nugget's xmplayer, converted with xmconv from PCSX-Redux.\n"
+    "Plain XM cannot hold the hardware ADSR, reverb, noise or pitch modulation;\n"
+    "the export log lists what it approximated or dropped.",
+    "XM files", ".xm",
+    {
+      DIV_SYSTEM_PS1
+    },
+    false, DIV_REQPOL_EXACT
+  );
 }
