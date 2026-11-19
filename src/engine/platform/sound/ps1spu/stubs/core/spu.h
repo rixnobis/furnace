@@ -59,6 +59,11 @@ class SPUInterface {
     virtual uint32_t getFrameCount() = 0;
     virtual void setLua(Lua L) = 0;
     virtual bool setWavDump(const std::filesystem::path &path) = 0;
+    virtual void writeDMAEndsAt(uint64_t endCycle) = 0;
+    virtual void reset() = 0;
+    virtual int getEffectiveSpeed() = 0;
+    virtual int getLatencyMargin() = 0;
+    virtual void setLatencyMargin(int ms) = 0;
     bool m_showDebug = false;
     bool m_showCfg = false;
 

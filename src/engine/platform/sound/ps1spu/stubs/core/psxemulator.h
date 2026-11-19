@@ -18,6 +18,7 @@ struct Emulator {
     static constexpr uint32_t m_psxClockSpeed = 33868800;
     std::unique_ptr<R3000Acpu> m_cpu = std::make_unique<R3000Acpu>();
     std::unique_ptr<SPULogger> m_spuLogger = std::make_unique<SPULogger>();
+    int getTurboFactor() const { return 1; }
 };
 inline thread_local Emulator *g_emulator = nullptr;
 // stateless (log is a no-op), so one shared instance serves every bridge.

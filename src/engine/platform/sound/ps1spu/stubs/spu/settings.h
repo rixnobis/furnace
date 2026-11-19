@@ -6,7 +6,8 @@ namespace SPU {
 typedef Setting<bool, TYPESTRING("Streaming"), true> Streaming;
 typedef Setting<int, TYPESTRING("Volume"), 3> Volume;
 typedef Setting<int, TYPESTRING("Interp"), 2> Interpolation;
+typedef Setting<int, TYPESTRING("Speed"), 1> Speed;
 typedef Setting<int, TYPESTRING("LatencyMargin"), 15> LatencyMargin;
-typedef Settings<Streaming, Volume, Interpolation, LatencyMargin> SettingsType;
+typedef Settings<Streaming, Volume, Interpolation, Speed, LatencyMargin> SettingsType;
 }  // namespace SPU
 }  // namespace PCSX

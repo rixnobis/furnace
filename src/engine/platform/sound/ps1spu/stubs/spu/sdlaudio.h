@@ -22,6 +22,8 @@ class SDLAudio {
     size_t getFramesBuffered(unsigned = 0) { return 0; }
     uint32_t getCurrentFrames() { return 0; }
     void waitForGoal(uint32_t) {}
+    size_t getVoiceCapacity() const { return 16 * 1024; }
+    static int effectiveSpeed(int configured, int turboFactor) { return configured * turboFactor; }
 };
 }  // namespace SPU
 }  // namespace PCSX
