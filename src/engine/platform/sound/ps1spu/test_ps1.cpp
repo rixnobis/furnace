@@ -819,6 +819,118 @@ static int spuArm(const char* tmpDir, const char* extVag) {
 
 // upload <song.fur> <bank.vab>: load the song, render its samples into SPU RAM, and compare
 // every uploaded sample with the VAB's ADPCM bodies.
+// xmplayer (format version 2) export: run the exporter on a song and walk out.xmp the way the
+// player reads it. Checks the header, every pattern decoding to exactly rows x channels cells,
+// each sample record's ADSR and flags against its instrument, the tick rate, and the reverb block
+// against the platform's registers. A truncated copy of the song must fail the walk.
+static bool xmpWalk(const std::vector<unsigned char>& x, int& cells, int& levels, String& why) {
+  auto u16=[&](size_t o)->unsigned { return x[o]|(x[o+1]<<8); };
+  auto u32=[&](size_t o)->unsigned { return u16(o)|(u16(o+2)<<16); };
+  cells=levels=0;
+  if (x.size()<72 || memcmp(x.data(),"PSXM",4)!=0 || u16(4)!=2 || u16(6)!=72) { why="header"; return false; }
+  unsigned chans=x[8], numPat=u16(16), patOff=u32(32);
+  if (patOff+numPat*8>x.size()) { why="pattern table"; return false; }
+  if (u32(28)+u16(12)>x.size()) { why="order table"; return false; }
+  if (u32(36)+u16(18)*208>x.size()) { why="instrument table"; return false; }
+  if (u32(40)+u16(20)*32>x.size()) { why="sample table"; return false; }
+  if (u32(68) && u32(68)+72>x.size()) { why="reverb block"; return false; }
+  for (unsigned p=0; p<numPat; p++) {
+    size_t o=u32(patOff+p*8), end=o+u16(patOff+p*8+6);
+    unsigned rows=u16(patOff+p*8+4);
+    if (end>x.size()) { why="pattern data"; return false; }
+    for (unsigned n=0; n<rows*chans; n++) {
+      if (o>=end) { why=fmt::sprintf("pattern %d ends after %d of %d cells",p,n,rows*chans); return false; }
+      unsigned char b=x[o++];
+      if (!(b&0x80)) { why="unpacked cell"; return false; }
+      o+=(b&1)+((b>>1)&1)+((b>>2)&1)+((b>>3)&1)+((b>>4)&1);
+      if (b&32) {
+        if (o+3>end) { why="extended effect past the pattern"; return false; }
+        if (x[o]==1) levels++;
+        o+=3;
+      }
+      cells++;
+    }
+    if (o!=end) { why=fmt::sprintf("pattern %d has %d bytes past its cells",p,(int)(end-o)); return false; }
+  }
+  return true;
+}
+
+static int xmpArm(const char* songPath) {
+  std::vector<unsigned char> song;
+  if (!fileBytes(songPath,song)) { printf("cannot open %s\n",songPath); return 1; }
+  DivEngine e;
+  e.preInit(true);
+  e.setAudio(DIV_AUDIO_DUMMY);
+  if (!e.init()) return 1;
+  unsigned char* b=new unsigned char[song.size()];
+  memcpy(b,song.data(),song.size());
+  if (!e.load(b,song.size(),songPath)) { printf("load failed\n"); return 1; }
+  DivROMExport* ex=e.buildROM(DIV_ROM_XMP_PS1);
+  if (ex==NULL || !ex->go(&e)) { printf("export did not start\n"); return 1; }
+  ex->wait();
+  if (ex->hasFailed()) { printf("export failed\n"); return 1; }
+  std::vector<unsigned char> x;
+  size_t smpSize=0;
+  for (DivROMExportOutput& o: ex->getResult()) {
+    if (o.name=="out.xmp") x.assign(o.data->getFinalBuf(),o.data->getFinalBuf()+o.data->size());
+    if (o.name=="out.smp") smpSize=o.data->size();
+  }
+  int fails=0, cells=0, levels=0;
+  String why;
+  auto u16=[&](size_t o)->unsigned { return x[o]|(x[o+1]<<8); };
+  auto u32=[&](size_t o)->unsigned { return u16(o)|(u16(o+2)<<16); };
+  if (!xmpWalk(x,cells,levels,why)) { printf("walk: FAIL (%s)\n",why.c_str()); fails++; }
+  else printf("walk: %d cells, %d level changes: OK\n",cells,levels);
+  if (levels==0) { printf("no level changes at all: FAIL\n"); fails++; }
+  std::vector<unsigned char> cut(x.begin(),x.begin()+x.size()*3/4);
+  int c2, l2;
+  if (xmpWalk(cut,c2,l2,why)) { printf("negative control: a truncated song walked clean: FAIL\n"); fails++; }
+  else printf("negative control: truncated song refused (%s): OK\n",why.c_str());
+  if (fails) {
+    fflush(stdout);
+    _exit(1);
+  }
+  unsigned tickRate=u32(64), want=(unsigned)lrint(e.curSubSong->hz*65536.0);
+  printf("tick rate %u (song %u): %s\n",tickRate,want,tickRate==want?"OK":"FAIL");
+  if (tickRate!=want) fails++;
+  if (u32(24)!=smpSize) { printf("sampleBytes %u, out.smp %u: FAIL\n",u32(24),(unsigned)smpSize); fails++; }
+  // sample records: ADSR and flags match the instrument whose keymap points at them
+  unsigned numIns=u16(18), numSmp=u16(20), insOff=u32(36), smpOff=u32(40);
+  int checked=0;
+  for (unsigned i=0; i<numIns && i<(unsigned)e.song.insLen; i++) {
+    DivInstrument* ins=e.song.ins[i];
+    if (ins->type!=DIV_INS_PS1) continue;
+    unsigned wantAdsr=ins->ps1.getADSR1()|((unsigned)ins->ps1.getADSR2()<<16);
+    for (int n=0; n<96; n++) {
+      unsigned s=x[insOff+i*208+n];
+      if (s==0xff) continue;
+      if (s>=numSmp) { printf("instrument %u note %d: sample %u of %u: FAIL\n",i,n,s,numSmp); fails++; continue; }
+      size_t r=smpOff+s*32;
+      unsigned flags=x[r+22];
+      bool ok=u32(r+28)==wantAdsr && (flags&4) && (bool)(flags&8)==ins->ps1.reverb && (bool)(flags&16)==ins->ps1.noise && (bool)(flags&32)==ins->ps1.pitchMod;
+      if (!ok) { printf("instrument %u sample record %u: adsr %08x flags %02x, want %08x: FAIL\n",i,s,u32(r+28),flags,wantAdsr); fails++; }
+      checked++;
+    }
+  }
+  printf("sample records: %d keymap entries checked against their instruments\n",checked);
+  if (!checked) { printf("no PS1 instrument keymap entries: FAIL\n"); fails++; }
+  // reverb block against the platform's registers
+  const unsigned short* regs=(const unsigned short*)e.getDispatch(0)->getRegisterPool();
+  unsigned rvb=u32(68), mbase=regs[(0xda2-0xc00)>>1];
+  if ((rvb!=0)!=(mbase!=0)) { printf("reverb offset %u with mBASE %04x: FAIL\n",rvb,mbase); fails++; }
+  if (rvb) {
+    int bad=0;
+    for (int i=0; i<32; i++) if (u16(rvb+i*2)!=regs[((0xdc0-0xc00)>>1)+i]) bad++;
+    if (u16(rvb+64)!=mbase) bad++;
+    printf("reverb block: %d of 33 registers differ: %s\n",bad,bad?"FAIL":"OK");
+    fails+=bad?1:0;
+  }
+  printf("%s: %s\n",songPath,fails?"FAIL":"ALL OK");
+  fflush(stdout);
+  // DivEngine::quit() can hang here (see the upload arm), so leave without it
+  _exit(fails?1:0);
+}
+
 static int uploadArm(const char* songPath, const char* vabPath) {
   std::vector<unsigned char> vab, song;
   if (!fileBytes(vabPath,vab) || vab.size()<32 || memcmp(vab.data(),"pBAV",4)!=0) { printf("bad VAB %s\n",vabPath); return 1; }
@@ -868,6 +980,7 @@ int main(int argc, char** argv) {
     if (argc<4) { printf("usage: ps1spu_test upload <song.fur> <bank.vab>\n"); return 1; }
     return uploadArm(argv[2],argv[3]);
   }
+  if (strcmp(mode,"xmp")==0) return xmpArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur");
   if (strcmp(mode,"fmt")==0) return fmtArm();
   if (strcmp(mode,"rvbregs")==0) return rvbRegsArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur",argc>3?argv[3]:NULL);
   if (strcmp(mode,"reverb")==0 || strcmp(mode,"noise")==0 || strcmp(mode,"pmod")==0) {
