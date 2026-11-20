@@ -931,6 +931,7 @@ src/engine/export/ipod.cpp
 src/engine/export/grub.cpp
 src/engine/export/spudump.cpp
 src/engine/export/xm.cpp
+src/engine/export/xmp.cpp
 
 src/engine/effect/abstract.cpp
 src/engine/effect/dummy.cpp

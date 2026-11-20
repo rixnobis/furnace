@@ -391,7 +391,9 @@ void DivExportXM::run() {
       }
       double semis=12.0*log2((double)sm->centerRate/8363.0);
       int rel=(int)floor(semis);
-      int ft=(int)lrint((semis-rel)*128.0);
+      // linear periods use finetune/2 (64 steps per semitone), so an odd finetune is truncated:
+      // round to the nearest 1/64 semitone and write it even
+      int ft=2*(int)lrint((semis-rel)*64.0);
       if (ft>127) { ft-=128; rel++; }
       if (rel>127 || rel<-128) loss[L_NOTE_RANGE]++;
       w32(w,len*2); w32(w,ls*2); w32(w,ll*2);

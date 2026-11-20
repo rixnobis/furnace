@@ -27,6 +27,7 @@
 #include "export/grub.h"
 #include "export/spudump.h"
 #include "export/xm.h"
+#include "export/xmp.h"
 
 DivROMExport* DivEngine::buildROM(DivROMExportOptions sys) {
   DivROMExport* exporter=NULL;
@@ -54,6 +55,9 @@ DivROMExport* DivEngine::buildROM(DivROMExportOptions sys) {
       break;
     case DIV_ROM_XM_PS1:
       exporter=new DivExportXM;
+      break;
+    case DIV_ROM_XMP_PS1:
+      exporter=new DivExportXMP;
       break;
     default:
       exporter=new DivROMExport;
