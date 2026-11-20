@@ -41,6 +41,8 @@ enum {
   L_NOTE_RANGE,
   L_MACROS,
   L_GROOVE,
+  L_SPEED,
+  L_JUMP,
   L_MAX
 };
 
@@ -52,6 +54,8 @@ const char* lossNames[L_MAX]={
   "notes outside C-0..B-7",
   "instruments with macros (not exported)",
   "groove (more than one speed)",
+  "speeds above 31 ticks per row (clamped to 31)",
+  "jumps (the target order is converted with the channel state of the order listed before it)",
 };
 
 struct Cell {
@@ -88,7 +92,7 @@ void DivExportXMP::run() {
     failed=true; running=false; return;
   }
   DivPlatformPS1* ps1=(DivPlatformPS1*)e->getDispatch(sys);
-  DivSubSong* sub=e->song.subsong[0];
+  DivSubSong* sub=e->curSubSong;
   int chans=MIN(24,e->getTotalChannelCount());
   int patLen=sub->patLen;
   if (patLen>256) {
@@ -128,6 +132,7 @@ void DivExportXMP::run() {
   };
   std::vector<SampleRec> recs;
   std::vector<std::vector<unsigned char>> keymaps(insCount,std::vector<unsigned char>(96,0xff));
+  int recsNeeded=0;
   for (int i=0; i<insCount; i++) {
     DivInstrument* ins=e->song.ins[i];
     if (hasMacros(ins)) loss[L_MACROS]++;
@@ -139,50 +144,45 @@ void DivExportXMP::run() {
       if (s<0 || spuRange.find(s)==spuRange.end()) continue;
       auto it=local.find(s);
       if (it==local.end()) {
-        if (recs.size()>=255) continue;
+        recsNeeded++;
+        if (recs.size()>=255) { local[s]=-1; continue; }
         local[s]=(int)recs.size();
         recs.push_back(SampleRec{i,s});
         it=local.find(s);
       }
-      keymaps[i][n]=(unsigned char)it->second;
+      if (it->second>=0) keymaps[i][n]=(unsigned char)it->second;
     }
   }
-
-  // patterns: one per distinct tuple of channel patterns; channel state is carried in song order
-  std::map<std::vector<int>,int> patIndex;
-  std::vector<std::vector<int>> patTuples;
-  std::vector<int> order;
-  for (int o=0; o<sub->ordersLen; o++) {
-    std::vector<int> t(chans);
-    for (int c=0; c<chans; c++) t[c]=sub->orders.ord[c][o];
-    auto it=patIndex.find(t);
-    if (it==patIndex.end()) {
-      patIndex[t]=(int)patTuples.size();
-      order.push_back((int)patTuples.size());
-      patTuples.push_back(t);
-    } else {
-      order.push_back(it->second);
-    }
-  }
-  if (order.size()>255 || patTuples.size()>256) {
-    logAppendf("ERROR: %d orders, %d patterns; the player holds 255 and 256",(int)order.size(),(int)patTuples.size());
+  if (recsNeeded>255) {
+    logAppendf("ERROR: %d sample records needed (one per instrument and sample it maps), the player holds 255; map fewer samples per instrument or merge instruments that share samples",recsNeeded);
     failed=true; running=false; delete smp; return;
   }
 
+  // patterns: every order is converted on its own, with the channel state it is entered with in
+  // song order (Furnace keeps volume and levels across orders), and orders that come out byte for
+  // byte the same share one pattern
+  std::map<std::vector<unsigned char>,int> patIndex;
+  std::vector<std::vector<unsigned char>> patData;
+  std::vector<int> order;
   std::vector<int> chVol(chans,127), chPanL(chans,255), chPanR(chans,255), chLevelL(chans,-1), chLevelR(chans,-1);
-  // the noise clock the platform starts with, set on the first row of the song
+  // the noise clock a freshly reset platform starts with (not the live one, which a preview may
+  // have changed), set on the first row of the song
+  int noiseInit=PS1_NOISE_DEFAULT;
   const unsigned short* regs=(const unsigned short*)ps1->getRegisterPool();
-  int noiseInit=(regs[(0xdaa-0xc00)>>1]>>8)&63;
   bool anyNoise=false;
   for (int i=0; i<insCount; i++) {
     if (e->song.ins[i]->type==DIV_INS_PS1 && e->song.ins[i]->ps1.noise) anyNoise=true;
   }
   if (!anyNoise) noiseInit=0;
-  std::vector<SafeWriter*> patData;
-  for (size_t p=0; p<patTuples.size(); p++) {
+  for (int o=0; o<sub->ordersLen; o++) {
+    if (mustAbort) {
+      logAppend("aborted");
+      delete smp;
+      failed=true; running=false; return;
+    }
     std::vector<std::vector<Cell>> rows(patLen,std::vector<Cell>(chans));
     for (int c=0; c<chans; c++) {
-      DivPattern* pat=sub->pat[c].getPattern(patTuples[p][c],false);
+      DivPattern* pat=sub->pat[c].getPattern(sub->orders.ord[c][o],false);
       int fxCols=sub->pat[c].effectCols;
       for (int r=0; r<patLen; r++) {
         Cell& cell=rows[r][c];
@@ -210,9 +210,19 @@ void DivExportXMP::run() {
             case 0x82: chPanR[c]=fv; break;
             case 0xfc: keyOff=fv; break;
             case 0x1d: noise=fv&63; break;
-            case 0x0f: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0f; otherFxv=CLAMP(fv,1,31); break;
-            case 0x0d: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10); break;
-            case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; break;
+            case 0x0f:
+              // Furnace ignores 0F00; F20 and up would be read as BPM
+              if (fv==0) break;
+              if (fv>31) { loss[L_SPEED]++; fv=31; }
+              if (otherFx>=0) loss[L_EXTRA_FX]++;
+              otherFx=0x0f; otherFxv=fv;
+              break;
+            case 0x0d:
+              if (otherFx>=0) loss[L_EXTRA_FX]++;
+              otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10);
+              if (fv) loss[L_JUMP]++;
+              break;
+            case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; loss[L_JUMP]++; break;
             default: loss[L_EFFECT]++; break;
           }
         }
@@ -236,7 +246,7 @@ void DivExportXMP::run() {
         }
       }
     }
-    if (p==(size_t)order[0] && noiseInit && patLen>0) {
+    if (o==0 && noiseInit && patLen>0) {
       // the starting noise clock, on the first row's first free extended slot
       int c=0;
       while (c<chans && rows[0][c].ext) c++;
@@ -247,25 +257,37 @@ void DivExportXMP::run() {
         loss[L_EXTRA_EXT]++;
       }
     }
-    SafeWriter* pw=new SafeWriter;
-    pw->init();
+    std::vector<unsigned char> pb;
     for (int r=0; r<patLen; r++) {
       for (int c=0; c<chans; c++) {
         Cell& cl=rows[r][c];
         int mask=0x80|(cl.note?1:0)|(cl.ins?2:0)|(cl.vol?4:0)|(cl.fx?8:0)|(cl.fxv?16:0)|(cl.ext?32:0);
-        pw->writeC(mask);
-        if (cl.note) pw->writeC(cl.note);
-        if (cl.ins) pw->writeC(cl.ins);
-        if (cl.vol) pw->writeC(cl.vol);
-        if (cl.fx) pw->writeC(cl.fx);
-        if (cl.fxv) pw->writeC(cl.fxv);
+        pb.push_back((unsigned char)mask);
+        if (cl.note) pb.push_back((unsigned char)cl.note);
+        if (cl.ins) pb.push_back((unsigned char)cl.ins);
+        if (cl.vol) pb.push_back((unsigned char)cl.vol);
+        if (cl.fx) pb.push_back((unsigned char)cl.fx);
+        if (cl.fxv) pb.push_back((unsigned char)cl.fxv);
         if (cl.ext) {
-          pw->writeC(cl.ext);
-          pw->writeS(cl.extv);
+          pb.push_back((unsigned char)cl.ext);
+          pb.push_back((unsigned char)(cl.extv&0xff));
+          pb.push_back((unsigned char)((cl.extv>>8)&0xff));
         }
       }
     }
-    patData.push_back(pw);
+    auto it=patIndex.find(pb);
+    if (it==patIndex.end()) {
+      patIndex[pb]=(int)patData.size();
+      order.push_back((int)patData.size());
+      patData.push_back(pb);
+    } else {
+      order.push_back(it->second);
+    }
+    progress[0].amount=0.9f*(o+1)/sub->ordersLen;
+  }
+  if (order.size()>255 || patData.size()>256) {
+    logAppendf("ERROR: %d orders, %d patterns; the player holds 255 and 256",(int)order.size(),(int)patData.size());
+    failed=true; running=false; delete smp; return;
   }
 
   // song file
@@ -280,7 +302,7 @@ void DivExportXMP::run() {
   w->writeC(bpm);
   w->writeS((int)order.size());
   w->writeS(0); // restart
-  w->writeS((int)patTuples.size());
+  w->writeS((int)patData.size());
   w->writeS(insCount);
   w->writeS((int)recs.size());
   w->writeS(0); // no ProTracker period table
@@ -296,17 +318,15 @@ void DivExportXMP::run() {
   for (int o: order) w->writeC(o);
   align4(w);
   size_t patternsOffset=w->size();
-  size_t dataAt=patternsOffset+patTuples.size()*8;
-  for (size_t p=0; p<patTuples.size(); p++) {
+  size_t dataAt=patternsOffset+patData.size()*8;
+  for (size_t p=0; p<patData.size(); p++) {
     w->writeI((int)dataAt);
     w->writeS(patLen);
-    w->writeS((int)patData[p]->size());
-    dataAt+=patData[p]->size();
+    w->writeS((int)patData[p].size());
+    dataAt+=patData[p].size();
   }
-  for (SafeWriter* pw: patData) {
-    w->write(pw->getFinalBuf(),pw->size());
-    pw->finish();
-    delete pw;
+  for (const std::vector<unsigned char>& pb: patData) {
+    if (!pb.empty()) w->write(pb.data(),pb.size());
   }
   align4(w);
   size_t instrumentsOffset=w->size();
@@ -373,7 +393,7 @@ void DivExportXMP::run() {
   w->writeI((int)samplesOffset);
   w->seek(0,SEEK_END);
 
-  logAppendf("%d channels, %d orders, %d patterns, %d instruments, %d sample records, tick rate %.6f Hz, speed %d",chans,(int)order.size(),(int)patTuples.size(),insCount,(int)recs.size(),tickRate/65536.0,speed);
+  logAppendf("%d channels, %d orders, %d patterns, %d instruments, %d sample records, tick rate %.6f Hz, speed %d",chans,(int)order.size(),(int)patData.size(),insCount,(int)recs.size(),tickRate/65536.0,speed);
   logAppendf("out.xmp: %d bytes, out.smp: %d bytes%s",(int)w->size(),(int)smp->size(),mbase?", reverb on":"");
   int total=0;
   for (int i=0; i<L_MAX; i++) {
@@ -422,5 +442,6 @@ void DivExportXMP::wait() {
 }
 
 DivROMExportProgress DivExportXMP::getProgress(int index) {
-  return progress[0];
+  if (index<0 || index>1) return progress[1];
+  return progress[index];
 }

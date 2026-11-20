@@ -20,6 +20,7 @@
 
 #include "../export.h"
 
+#include <atomic>
 #include <thread>
 
 // FastTracker 2 module from a PS1 SPU song, for nugget's xmplayer via Redux's xmconv.
@@ -27,7 +28,7 @@ class DivExportXM: public DivROMExport {
   DivEngine* e;
   std::thread* exportThread;
   DivROMExportProgress progress[2];
-  bool running, failed, mustAbort;
+  std::atomic<bool> running, failed, mustAbort;
   void run();
   public:
     bool go(DivEngine* e);

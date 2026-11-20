@@ -24,6 +24,9 @@
 #include "../macroInt.h"
 #include "sound/ps1spu/bridge.h"
 
+// the noise clock the platform starts with after a reset (SPUCNT bits 13-8)
+#define PS1_NOISE_DEFAULT 0x20
+
 // Sony PlayStation SPU, emulated by the pcsx-redux core (sound/ps1spu).
 // note on/off with samples, per-instrument ADSR, volume, panning, the per-voice
 // reverb/noise/pitch-mod enable bits, reverb presets (system flags) and the noise clock (1Dxx).

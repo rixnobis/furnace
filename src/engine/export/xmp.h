@@ -20,6 +20,7 @@
 
 #include "../export.h"
 
+#include <atomic>
 #include <thread>
 
 // out.xmp + out.smp for nugget's xmplayer (format version 2) from a PS1 SPU song.
@@ -27,7 +28,7 @@ class DivExportXMP: public DivROMExport {
   DivEngine* e;
   std::thread* exportThread;
   DivROMExportProgress progress[2];
-  bool running, failed, mustAbort;
+  std::atomic<bool> running, failed, mustAbort;
   void run();
   public:
     bool go(DivEngine* e);

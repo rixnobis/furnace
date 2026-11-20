@@ -54,6 +54,9 @@ enum {
   L_NOTE_RANGE,
   L_SHARED_SAMPLE,
   L_VOL_QUANT,
+  L_SPEED,
+  L_KEYMAP,
+  L_JUMP,
   L_MAX
 };
 
@@ -74,6 +77,9 @@ const char* lossNames[L_MAX]={
   "notes outside XM's C-0..B-7",
   "samples written once per instrument that uses them",
   "volume changes that round to the same XM volume as a different Furnace volume",
+  "speeds above XM's 31 ticks per row (clamped to 31)",
+  "keys with no sample and no free XM sample slot to keep them silent",
+  "jumps (the target order is converted with the channel state of the order listed before it)",
 };
 
 // PS1 ADSR, per sample at 44100 Hz, sampled every tick: a 12-point envelope is the best plain XM
@@ -136,7 +142,7 @@ struct Cell {
 void DivExportXM::run() {
   int loss[L_MAX];
   memset(loss,0,sizeof(loss));
-  DivSubSong* sub=e->song.subsong[0];
+  DivSubSong* sub=e->curSubSong;
   int chans=e->getTotalChannelCount();
   if (chans>32) {
     logAppendf("ERROR: %d channels, XM holds 32",chans);
@@ -156,6 +162,8 @@ void DivExportXM::run() {
   if (bpm<32) { loss[L_TICKRATE]=1; bpm=32; }
   if (sub->speeds.len>1) loss[L_GROOVE]=1;
   int speed=sub->speeds.val[0];
+  if (speed>31) { loss[L_SPEED]++; speed=31; }
+  if (speed<1) speed=1;
 
   // instruments: one XM instrument per Furnace instrument; its samples are the ones it maps.
   int insCount=MIN(128,e->song.insLen);
@@ -168,44 +176,25 @@ void DivExportXM::run() {
   w16(w,0x104);
   w32(w,276);
 
-  // patterns: one per distinct tuple of channel patterns
-  std::map<std::vector<int>,int> patIndex;
-  std::vector<std::vector<int>> patTuples;
+  // patterns: every order is converted on its own, with the channel state it is entered with in
+  // song order (Furnace keeps volume and pan across orders), and orders that come out byte for
+  // byte the same share one XM pattern.
+  std::map<std::vector<unsigned char>,int> patIndex;
+  std::vector<std::vector<unsigned char>> patBytes;
   std::vector<int> order;
-  for (int o=0; o<sub->ordersLen; o++) {
-    std::vector<int> t(chans);
-    for (int c=0; c<chans; c++) t[c]=sub->orders.ord[c][o];
-    auto it=patIndex.find(t);
-    if (it==patIndex.end()) {
-      patIndex[t]=(int)patTuples.size();
-      order.push_back((int)patTuples.size());
-      patTuples.push_back(t);
-    } else {
-      order.push_back(it->second);
-    }
-  }
-  if (order.size()>256 || patTuples.size()>256) {
-    logAppendf("ERROR: %d orders, %d patterns; XM holds 256 of each",(int)order.size(),(int)patTuples.size());
-    failed=true; running=false; delete w; return;
-  }
-  w16(w,(int)order.size());
-  w16(w,0); // restart
-  w16(w,xmChans);
-  w16(w,(int)patTuples.size());
-  w16(w,insCount);
-  w16(w,1); // linear frequency table
-  w16(w,speed);
-  w16(w,bpm);
-  for (int i=0; i<256; i++) w8(w,i<(int)order.size()?order[i]:0);
-
   // channel state carried in song order, to keep Furnace's semantics: volume persists across
   // notes, and the two levels of 81xx/82xx become one volume and one pan.
   std::vector<int> chVol(chans,127), chPanL(chans,255), chPanR(chans,255), chXmVol(chans,-1), chXmPan(chans,128);
   std::map<int,int> volSeen; // xm volume -> furnace volume*1000+pan sum, for the rounding count
-  for (size_t p=0; p<patTuples.size(); p++) {
+  for (int o=0; o<sub->ordersLen; o++) {
+    if (mustAbort) {
+      logAppend("aborted");
+      delete w;
+      failed=true; running=false; return;
+    }
     std::vector<std::vector<Cell>> rows(patLen,std::vector<Cell>(xmChans));
     for (int c=0; c<chans; c++) {
-      DivPattern* pat=sub->pat[c].getPattern(patTuples[p][c],false);
+      DivPattern* pat=sub->pat[c].getPattern(sub->orders.ord[c][o],false);
       int fxCols=sub->pat[c].effectCols;
       for (int r=0; r<patLen; r++) {
         Cell& cell=rows[r][c];
@@ -221,26 +210,36 @@ void DivExportXM::run() {
           newNote=true;
         }
         if (d[DIV_PAT_INS]>=0 && d[DIV_PAT_INS]<insCount) cell.ins=d[DIV_PAT_INS]+1;
-        if (newNote && cell.ins==0) {
-          // XM only resets volume when an instrument is given; Furnace keeps the channel's
-        }
         if (d[DIV_PAT_VOL]>=0) chVol[c]=d[DIV_PAT_VOL]&127;
         bool panChanged=false;
         int keyOff=-1;
         int otherFx=-1, otherFxv=0;
-        int fxUsed=0;
         for (int k=0; k<fxCols; k++) {
           int fx=d[DIV_PAT_FX(k)], fv=d[DIV_PAT_FXVAL(k)];
           if (fx<0) continue;
           if (fv<0) fv=0;
           switch (fx) {
-            case 0x80: chPanL[c]=255-fv; chPanR[c]=fv; panChanged=true; break; // unused by the examples
+            case 0x80: { // linear, converted the way playback does
+              unsigned int pan=e->convertPanLinearToSplit(fv,8,255);
+              chPanL[c]=pan>>8; chPanR[c]=pan&0xff; panChanged=true;
+              break;
+            }
             case 0x81: chPanL[c]=fv; panChanged=true; break;
             case 0x82: chPanR[c]=fv; panChanged=true; break;
             case 0xfc: keyOff=fv; break;
-            case 0x0f: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0f; otherFxv=fv; fxUsed++; break;
-            case 0x0d: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10); fxUsed++; break;
-            case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; fxUsed++; break;
+            case 0x0f:
+              // Furnace ignores 0F00; XM reads F20 and up as BPM, so a speed that high is clamped
+              if (fv==0) break;
+              if (fv>31) { loss[L_SPEED]++; fv=31; }
+              if (otherFx>=0) loss[L_EXTRA_FX]++;
+              otherFx=0x0f; otherFxv=fv;
+              break;
+            case 0x0d:
+              if (otherFx>=0) loss[L_EXTRA_FX]++;
+              otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10);
+              if (fv) loss[L_JUMP]++;
+              break;
+            case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; loss[L_JUMP]++; break;
             default: loss[L_EFFECT]++; break;
           }
         }
@@ -273,47 +272,71 @@ void DivExportXM::run() {
             loss[L_PAN_DROPPED]++;
           }
         }
-        (void)fxUsed;
       }
     }
     // pack
-    SafeWriter* pw=new SafeWriter;
-    pw->init();
+    std::vector<unsigned char> pb;
     for (int r=0; r<patLen; r++) {
       for (int c=0; c<xmChans; c++) {
         Cell& cl=rows[r][c];
         int mask=0x80|(cl.note?1:0)|(cl.ins?2:0)|(cl.vol?4:0)|(cl.fx?8:0)|(cl.fxv?16:0);
         if (mask==0x9f) {
-          pw->writeC(cl.note); pw->writeC(cl.ins); pw->writeC(cl.vol); pw->writeC(cl.fx); pw->writeC(cl.fxv);
+          for (int v: {cl.note,cl.ins,cl.vol,cl.fx,cl.fxv}) pb.push_back((unsigned char)v);
           continue;
         }
-        pw->writeC(mask);
-        if (cl.note) pw->writeC(cl.note);
-        if (cl.ins) pw->writeC(cl.ins);
-        if (cl.vol) pw->writeC(cl.vol);
-        if (cl.fx) pw->writeC(cl.fx);
-        if (cl.fxv) pw->writeC(cl.fxv);
+        pb.push_back((unsigned char)mask);
+        if (cl.note) pb.push_back((unsigned char)cl.note);
+        if (cl.ins) pb.push_back((unsigned char)cl.ins);
+        if (cl.vol) pb.push_back((unsigned char)cl.vol);
+        if (cl.fx) pb.push_back((unsigned char)cl.fx);
+        if (cl.fxv) pb.push_back((unsigned char)cl.fxv);
       }
     }
+    auto it=patIndex.find(pb);
+    if (it==patIndex.end()) {
+      patIndex[pb]=(int)patBytes.size();
+      order.push_back((int)patBytes.size());
+      patBytes.push_back(pb);
+    } else {
+      order.push_back(it->second);
+    }
+    progress[0].amount=0.5f*(o+1)/sub->ordersLen;
+  }
+  if (order.size()>256 || patBytes.size()>256) {
+    logAppendf("ERROR: %d orders, %d patterns; XM holds 256 of each",(int)order.size(),(int)patBytes.size());
+    failed=true; running=false; delete w; return;
+  }
+  w16(w,(int)order.size());
+  w16(w,0); // restart
+  w16(w,xmChans);
+  w16(w,(int)patBytes.size());
+  w16(w,insCount);
+  w16(w,1); // linear frequency table
+  w16(w,speed);
+  w16(w,bpm);
+  for (int i=0; i<256; i++) w8(w,i<(int)order.size()?order[i]:0);
+  for (const std::vector<unsigned char>& pb: patBytes) {
     w32(w,9);
     w8(w,0);
     w16(w,patLen);
-    w16(w,(int)pw->size());
-    w->write(pw->getFinalBuf(),pw->size());
-    pw->finish();
-    delete pw;
-    progress[0].amount=0.5f*(p+1)/patTuples.size();
+    w16(w,(int)pb.size());
+    if (!pb.empty()) w->write(pb.data(),pb.size());
   }
 
   // instruments
   std::vector<int> sampleUses(e->song.sampleLen,0);
   double tickSamples=44100.0/sub->hz;
   for (int i=0; i<insCount; i++) {
+    if (mustAbort) {
+      logAppend("aborted");
+      delete w;
+      failed=true; running=false; return;
+    }
     DivInstrument* ins=e->song.ins[i];
     std::vector<int> smps; // furnace sample index per XM sample slot
-    unsigned char keymap[96];
-    memset(keymap,0,96);
+    int slot[96]; // XM sample slot per key, -1 for a key that plays nothing
     for (int n=0; n<96; n++) {
+      slot[n]=-1;
       int fn=n+60;
       int s=ins->amiga.getSample(fn);
       if (ins->amiga.useNoteMap && ins->amiga.getFreq(fn)!=fn) loss[L_NOTEMAP]++;
@@ -324,10 +347,23 @@ void DivExportXM::run() {
         smps.push_back(s);
         it=smps.end()-1;
       }
-      keymap[n]=(unsigned char)(it-smps.begin());
+      slot[n]=(int)(it-smps.begin());
+    }
+    // a key with no sample points at the first slot past the instrument's samples: FT2 finds an
+    // empty slot there, libopenmpt and xmconv read an index past numSamples as no sample. With all
+    // 16 slots taken FT2 has no empty one left.
+    unsigned char keymap[96];
+    for (int n=0; n<96; n++) {
+      if (slot[n]>=0) {
+        keymap[n]=(unsigned char)slot[n];
+      } else {
+        keymap[n]=(unsigned char)smps.size();
+        if (smps.size()>=16) loss[L_KEYMAP]++;
+      }
     }
     for (int s: smps) sampleUses[s]++;
-    w32(w,263);
+    // an instrument without samples ends after its sample count: 29 bytes
+    w32(w,smps.empty()?29:263);
     wstr(w,ins->name,22);
     w8(w,0);
     w16(w,(int)smps.size());
@@ -409,7 +445,7 @@ void DivExportXM::run() {
   }
   for (int s=0; s<e->song.sampleLen; s++) if (sampleUses[s]>1) loss[L_SHARED_SAMPLE]++;
 
-  logAppendf("%d channels, %d orders, %d patterns, %d instruments, speed %d, BPM %d",xmChans,(int)order.size(),(int)patTuples.size(),insCount,speed,bpm);
+  logAppendf("%d channels, %d orders, %d patterns, %d instruments, speed %d, BPM %d",xmChans,(int)order.size(),(int)patBytes.size(),insCount,speed,bpm);
   int total=0;
   for (int i=0; i<L_MAX; i++) {
     if (!loss[i]) continue;
@@ -456,5 +492,6 @@ void DivExportXM::wait() {
 }
 
 DivROMExportProgress DivExportXM::getProgress(int index) {
-  return progress[0];
+  if (index<0 || index>1) return progress[1];
+  return progress[index];
 }
