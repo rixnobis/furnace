@@ -16,6 +16,7 @@
 //   spu [tmpdir] [other.vag]: SPU ADPCM sample depth: on-disk id 0xE1 and foreign guard,
 //           conversion, loop flags, VAG round trip, PS1 loop hint, upload as stored
 //   upload <song.fur> <bank.vab>: uploaded SPU RAM bytes of each sample vs the VAB bodies
+#include <array>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -828,16 +829,19 @@ static bool xmpWalk(const std::vector<unsigned char>& x, int& cells, int& levels
   auto u32=[&](size_t o)->unsigned { return u16(o)|(u16(o+2)<<16); };
   cells=levels=0;
   if (x.size()<72 || memcmp(x.data(),"PSXM",4)!=0 || u16(4)!=2 || u16(6)!=72) { why="header"; return false; }
+  // offset first, then the count against what is left, so a huge offset cannot wrap the sum
+  auto fits=[&](size_t off, size_t count, size_t each)->bool { return off<=x.size() && count<=(x.size()-off)/each; };
   unsigned chans=x[8], numPat=u16(16), patOff=u32(32);
-  if (patOff+numPat*8>x.size()) { why="pattern table"; return false; }
-  if (u32(28)+u16(12)>x.size()) { why="order table"; return false; }
-  if (u32(36)+u16(18)*208>x.size()) { why="instrument table"; return false; }
-  if (u32(40)+u16(20)*32>x.size()) { why="sample table"; return false; }
-  if (u32(68) && u32(68)+72>x.size()) { why="reverb block"; return false; }
+  if (!fits(patOff,numPat,8)) { why="pattern table"; return false; }
+  if (!fits(u32(28),u16(12),1)) { why="order table"; return false; }
+  if (!fits(u32(36),u16(18),208)) { why="instrument table"; return false; }
+  if (!fits(u32(40),u16(20),32)) { why="sample table"; return false; }
+  if (u32(68) && !fits(u32(68),1,72)) { why="reverb block"; return false; }
   for (unsigned p=0; p<numPat; p++) {
-    size_t o=u32(patOff+p*8), end=o+u16(patOff+p*8+6);
+    size_t o=u32(patOff+p*8), len=u16(patOff+p*8+6);
     unsigned rows=u16(patOff+p*8+4);
-    if (end>x.size()) { why="pattern data"; return false; }
+    if (!fits(o,len,1)) { why="pattern data"; return false; }
+    size_t end=o+len;
     for (unsigned n=0; n<rows*chans; n++) {
       if (o>=end) { why=fmt::sprintf("pattern %d ends after %d of %d cells",p,n,rows*chans); return false; }
       unsigned char b=x[o++];
@@ -931,6 +935,148 @@ static int xmpArm(const char* songPath) {
   _exit(fails?1:0);
 }
 
+// edge cases for both exporters, on a song cut down to three orders A/B/A on channel 0: B sets the
+// volume, so the second A has to be converted with B's volume (and not share the first A's bytes);
+// 0F20 clamps to a speed, 0F00 is dropped, 8080 keeps full level; an instrument without samples
+// writes a 29-byte header and a key without a sample stays silent; progress ends after index 0.
+static DivROMExport* runExport(DivEngine& e, DivROMExportOptions which, std::vector<unsigned char>& x, const char* name) {
+  DivROMExport* ex=e.buildROM(which);
+  if (ex==NULL || !ex->go(&e)) return NULL;
+  ex->wait();
+  if (ex->hasFailed()) return NULL;
+  for (DivROMExportOutput& o: ex->getResult()) {
+    if (o.name==name) x.assign(o.data->getFinalBuf(),o.data->getFinalBuf()+o.data->size());
+  }
+  return ex;
+}
+
+static int xmEdgeArm(const char* songPath) {
+  std::vector<unsigned char> song;
+  if (!fileBytes(songPath,song)) { printf("cannot open %s\n",songPath); return 1; }
+  DivEngine e;
+  e.preInit(true);
+  e.setAudio(DIV_AUDIO_DUMMY);
+  if (!e.init()) return 1;
+  unsigned char* b=new unsigned char[song.size()];
+  memcpy(b,song.data(),song.size());
+  if (!e.load(b,song.size(),songPath)) { printf("load failed\n"); return 1; }
+  DivSubSong* sub=e.curSubSong;
+  int chans=e.getTotalChannelCount();
+  const int A=200, B=201, Z=202;
+  sub->ordersLen=3;
+  for (int c=0; c<chans; c++) for (int o=0; o<3; o++) sub->orders.ord[c][o]=Z;
+  sub->orders.ord[0][0]=A; sub->orders.ord[0][1]=B; sub->orders.ord[0][2]=A;
+  sub->pat[0].effectCols=MAX(1,sub->pat[0].effectCols);
+  for (int c=0; c<chans; c++) sub->pat[c].getPattern(Z,true);
+  DivPattern* pa=sub->pat[0].getPattern(A,true);
+  DivPattern* pb=sub->pat[0].getPattern(B,true);
+  pa->newData[0][DIV_PAT_NOTE]=108; pa->newData[0][DIV_PAT_INS]=0;
+  pa->newData[1][DIV_PAT_FX(0)]=0x0f; pa->newData[1][DIV_PAT_FXVAL(0)]=0x20;
+  pa->newData[2][DIV_PAT_FX(0)]=0x0f; pa->newData[2][DIV_PAT_FXVAL(0)]=0x00;
+  pa->newData[3][DIV_PAT_FX(0)]=0x80; pa->newData[3][DIV_PAT_FXVAL(0)]=0x80;
+  pb->newData[0][DIV_PAT_VOL]=63;
+  // instrument E: no sample at all; instrument U: sample 0 from C-4 up, nothing below
+  DivInstrument* ie=new DivInstrument; ie->name="empty"; ie->amiga.initSample=-1; ie->amiga.useNoteMap=false;
+  DivInstrument* iu=new DivInstrument; iu->name="upper"; iu->amiga.useNoteMap=true;
+  for (int n=0; n<180; n++) { iu->amiga.noteMap[n].freq=n; iu->amiga.noteMap[n].map=(n>=108)?0:-1; }
+  e.song.ins.push_back(ie); e.song.ins.push_back(iu); e.song.insLen=(int)e.song.ins.size();
+  int insE=e.song.insLen-2, insU=e.song.insLen-1;
+  int fails=0;
+  auto check=[&](const char* what, bool cond) { printf("%s: %s\n",what,cond?"OK":"FAIL"); if (!cond) fails++; };
+
+  // plain XM
+  std::vector<unsigned char> x;
+  DivROMExport* ex=runExport(e,DIV_ROM_XM_PS1,x,"out.xm");
+  check("xm export",ex!=NULL && x.size()>336);
+  if (ex==NULL || x.size()<=336) { fflush(stdout); _exit(1); }
+  check("xm progress ends after index 0",!ex->getProgress(0).name.empty() && ex->getProgress(1).name.empty());
+  auto u16=[&](size_t o)->unsigned { return o+2<=x.size()?(x[o]|(x[o+1]<<8)):0; };
+  auto u32=[&](size_t o)->unsigned { return u16(o)|(u16(o+2)<<16); };
+  unsigned ordN=u16(64), xmChans=u16(68), patN=u16(70), insN=u16(72);
+  check("xm three orders",ordN==3);
+  check("xm second A is its own pattern",x[80]!=x[82]);
+  // cells of channel 0, rows 0..3, for each pattern
+  std::vector<size_t> patAt;
+  std::vector<std::vector<std::array<int,5>>> ch0;
+  size_t o=60+u32(60);
+  for (unsigned p=0; p<patN && o+9<=x.size(); p++) {
+    unsigned rows=u16(o+5), len=u16(o+7);
+    size_t q=o+u32(o), end=q+len;
+    std::vector<std::array<int,5>> cells;
+    for (unsigned n=0; n<rows*xmChans && q<end; n++) {
+      std::array<int,5> c={0,0,0,0,0};
+      unsigned char m=x[q];
+      if (m&0x80) { q++; for (int k=0; k<5; k++) if (m&(1<<k)) c[k]=x[q++]; }
+      else { for (int k=0; k<5; k++) c[k]=x[q++]; }
+      if (n%xmChans==0 && n/xmChans<4) cells.push_back(c);
+    }
+    ch0.push_back(cells);
+    o=end;
+  }
+  bool shapes=ch0.size()==patN && x[80]<patN && x[82]<patN;
+  for (auto& c: ch0) shapes=shapes && c.size()==4;
+  check("xm patterns decode",shapes);
+  if (shapes) {
+    auto& a1=ch0[x[80]];
+    auto& a2=ch0[x[82]];
+    check("xm first A starts at volume 64",a1[0][2]==0x10+64);
+    check("xm second A starts at B's volume (63 of 127 -> 32)",a2[0][2]==0x10+32);
+    check("xm 0F20 becomes speed 31",a1[1][3]==0x0f && a1[1][4]==31);
+    check("xm 0F00 is dropped",a1[2][3]==0 && a1[2][4]==0);
+    check("xm 8080 keeps full volume",a1[3][2]==0 || a1[3][2]==0x10+64);
+  }
+  // instruments, each advanced by its declared header size; the file has to end exactly
+  bool walk=true; unsigned emptySize=0; int keyLow=-1, keyHigh=-1, uSamples=-1;
+  for (unsigned i=0; i<insN && walk; i++) {
+    if (o+29>x.size()) { walk=false; break; }
+    unsigned size=u32(o), ns=u16(o+27);
+    if ((int)i==insE) emptySize=size;
+    if ((int)i==insU && o+33+96<=x.size()) { keyLow=x[o+33+0]; keyHigh=x[o+33+95]; uSamples=ns; }
+    size_t next=o+size;
+    if (ns) {
+      size_t sh=next, data=0;
+      for (unsigned k=0; k<ns; k++) { data+=u32(sh); sh+=u32(o+29); }
+      next=sh+data;
+    }
+    if (next>x.size()) walk=false;
+    o=next;
+  }
+  check("xm instruments walk to the end of the file",walk && o==x.size());
+  check("xm sampleless instrument declares 29 bytes",emptySize==29);
+  check("xm key without a sample points past the samples",uSamples==1 && keyLow==1 && keyHigh==0);
+
+  // xmplayer
+  std::vector<unsigned char> y;
+  ex=runExport(e,DIV_ROM_XMP_PS1,y,"out.xmp");
+  check("xmp export",ex!=NULL && y.size()>72);
+  if (ex==NULL || y.size()<=72) { fflush(stdout); _exit(1); }
+  check("xmp progress ends after index 0",!ex->getProgress(0).name.empty() && ex->getProgress(1).name.empty());
+  int cells, levels;
+  String why;
+  check("xmp walk",xmpWalk(y,cells,levels,why));
+  auto v16=[&](size_t o)->unsigned { return y[o]|(y[o+1]<<8); };
+  auto v32=[&](size_t o)->unsigned { return v16(o)|(v16(o+2)<<16); };
+  unsigned yChans=y[8], ordOff=v32(28), patOff=v32(32), insOff=v32(36);
+  unsigned a1=y[ordOff], a2=y[ordOff+2];
+  check("xmp second A is its own pattern",a1!=a2);
+  // levels set on channel 0, row 0 of each A (-1: none)
+  auto row0Level=[&](unsigned p)->int {
+    size_t q=v32(patOff+p*8);
+    unsigned char m=y[q++];
+    q+=(m&1)+((m>>1)&1)+((m>>2)&1)+((m>>3)&1)+((m>>4)&1);
+    if ((m&32) && y[q]==1) return (int)v16(q+1);
+    return -1;
+  };
+  (void)yChans;
+  check("xmp first A sets (255,255)",row0Level(a1)==(255|(255<<8)));
+  int l2=row0Level(a2);
+  check("xmp second A keeps B's (126,126)",l2==-1 || l2==(126|(126<<8)));
+  check("xmp key without a sample is 0xff",y[insOff+insU*208+0]==0xff && y[insOff+insU*208+95]!=0xff);
+  printf("%s edge cases: %s\n",songPath,fails?"FAIL":"ALL OK");
+  fflush(stdout);
+  _exit(fails?1:0);
+}
+
 static int uploadArm(const char* songPath, const char* vabPath) {
   std::vector<unsigned char> vab, song;
   if (!fileBytes(vabPath,vab) || vab.size()<32 || memcmp(vab.data(),"pBAV",4)!=0) { printf("bad VAB %s\n",vabPath); return 1; }
@@ -981,6 +1127,7 @@ int main(int argc, char** argv) {
     return uploadArm(argv[2],argv[3]);
   }
   if (strcmp(mode,"xmp")==0) return xmpArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur");
+  if (strcmp(mode,"xmedge")==0) return xmEdgeArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur");
   if (strcmp(mode,"fmt")==0) return fmtArm();
   if (strcmp(mode,"rvbregs")==0) return rvbRegsArm(argc>2?argv[2]:"papers/ps1-examples/keynote.fur",argc>3?argv[3]:NULL);
   if (strcmp(mode,"reverb")==0 || strcmp(mode,"noise")==0 || strcmp(mode,"pmod")==0) {
