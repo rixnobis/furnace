@@ -155,7 +155,7 @@ void DivExportXMP::run() {
   }
   if (recsNeeded>255) {
     logAppendf("ERROR: %d sample records needed (one per instrument and sample it maps), the player holds 255; map fewer samples per instrument or merge instruments that share samples",recsNeeded);
-    failed=true; running=false; delete smp; return;
+    failed=true; running=false; smp->finish(); delete smp; return;
   }
 
   // patterns: every order is converted on its own, with the channel state it is entered with in
@@ -177,6 +177,7 @@ void DivExportXMP::run() {
   for (int o=0; o<sub->ordersLen; o++) {
     if (mustAbort) {
       logAppend("aborted");
+      smp->finish();
       delete smp;
       failed=true; running=false; return;
     }
@@ -220,7 +221,7 @@ void DivExportXMP::run() {
             case 0x0d:
               if (otherFx>=0) loss[L_EXTRA_FX]++;
               otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10);
-              if (fv) loss[L_JUMP]++;
+              loss[L_JUMP]++;
               break;
             case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; loss[L_JUMP]++; break;
             default: loss[L_EFFECT]++; break;
@@ -287,7 +288,7 @@ void DivExportXMP::run() {
   }
   if (order.size()>255 || patData.size()>256) {
     logAppendf("ERROR: %d orders, %d patterns; the player holds 255 and 256",(int)order.size(),(int)patData.size());
-    failed=true; running=false; delete smp; return;
+    failed=true; running=false; smp->finish(); delete smp; return;
   }
 
   // song file
@@ -402,6 +403,14 @@ void DivExportXMP::run() {
     total++;
   }
   if (!total) logAppend("no losses");
+  if (mustAbort) {
+    logAppend("aborted");
+    w->finish();
+    delete w;
+    smp->finish();
+    delete smp;
+    failed=true; running=false; return;
+  }
   progressAmount=1.0f;
   logAppend("finished!");
   output.push_back(DivROMExportOutput("out.xmp",w));

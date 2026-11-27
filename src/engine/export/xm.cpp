@@ -191,6 +191,7 @@ void DivExportXM::run() {
   for (int o=0; o<sub->ordersLen; o++) {
     if (mustAbort) {
       logAppend("aborted");
+      w->finish();
       delete w;
       failed=true; running=false; return;
     }
@@ -242,7 +243,7 @@ void DivExportXM::run() {
             case 0x0d:
               if (otherFx>=0) loss[L_EXTRA_FX]++;
               otherFx=0x0d; otherFxv=((fv/10)<<4)|(fv%10);
-              if (fv) loss[L_JUMP]++;
+              loss[L_JUMP]++;
               break;
             case 0x0b: if (otherFx>=0) loss[L_EXTRA_FX]++; otherFx=0x0b; otherFxv=fv; loss[L_JUMP]++; break;
             default: loss[L_EFFECT]++; break;
@@ -309,7 +310,7 @@ void DivExportXM::run() {
   }
   if (order.size()>256 || patBytes.size()>256) {
     logAppendf("ERROR: %d orders, %d patterns; XM holds 256 of each",(int)order.size(),(int)patBytes.size());
-    failed=true; running=false; delete w; return;
+    failed=true; running=false; w->finish(); delete w; return;
   }
   w16(w,(int)order.size());
   w16(w,0); // restart
@@ -334,6 +335,7 @@ void DivExportXM::run() {
   for (int i=0; i<insCount; i++) {
     if (mustAbort) {
       logAppend("aborted");
+      w->finish();
       delete w;
       failed=true; running=false; return;
     }
@@ -442,6 +444,7 @@ void DivExportXM::run() {
       wstr(w,sm->name,22);
       pcm.push_back(v);
     }
+    if (mustAbort) break;
     for (auto& v: pcm) {
       short prev=0;
       for (short x: v) { w16(w,(short)(x-prev)); prev=x; }
@@ -458,6 +461,12 @@ void DivExportXM::run() {
     total++;
   }
   if (!total) logAppend("no losses");
+  if (mustAbort) {
+    logAppend("aborted");
+    w->finish();
+    delete w;
+    failed=true; running=false; return;
+  }
   progressAmount=1.0f;
   logAppend("finished!");
   output.push_back(DivROMExportOutput("out.xm",w));
