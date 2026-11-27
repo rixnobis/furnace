@@ -283,7 +283,7 @@ void DivExportXMP::run() {
     } else {
       order.push_back(it->second);
     }
-    progress[0].amount=0.9f*(o+1)/sub->ordersLen;
+    progressAmount=0.9f*(o+1)/sub->ordersLen;
   }
   if (order.size()>255 || patData.size()>256) {
     logAppendf("ERROR: %d orders, %d patterns; the player holds 255 and 256",(int)order.size(),(int)patData.size());
@@ -402,7 +402,7 @@ void DivExportXMP::run() {
     total++;
   }
   if (!total) logAppend("no losses");
-  progress[0].amount=1.0f;
+  progressAmount=1.0f;
   logAppend("finished!");
   output.push_back(DivROMExportOutput("out.xmp",w));
   output.push_back(DivROMExportOutput("out.smp",smp));
@@ -412,6 +412,7 @@ void DivExportXMP::run() {
 bool DivExportXMP::go(DivEngine* eng) {
   progress[0].name="Export";
   progress[0].amount=0.0f;
+  progressAmount=0.0f;
   e=eng;
   running=true;
   failed=false;
@@ -443,5 +444,7 @@ void DivExportXMP::wait() {
 
 DivROMExportProgress DivExportXMP::getProgress(int index) {
   if (index<0 || index>1) return progress[1];
-  return progress[index];
+  DivROMExportProgress p=progress[index];
+  if (index==0) p.amount=progressAmount;
+  return p;
 }

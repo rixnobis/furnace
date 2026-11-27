@@ -57,6 +57,7 @@ enum {
   L_SPEED,
   L_KEYMAP,
   L_JUMP,
+  L_INS_LIMIT,
   L_MAX
 };
 
@@ -80,6 +81,7 @@ const char* lossNames[L_MAX]={
   "speeds above XM's 31 ticks per row (clamped to 31)",
   "keys with no sample and no free XM sample slot to keep them silent",
   "jumps (the target order is converted with the channel state of the order listed before it)",
+  "notes selecting an instrument past XM's 128 (written with no instrument)",
 };
 
 // PS1 ADSR, per sample at 44100 Hz, sampled every tick: a 12-point envelope is the best plain XM
@@ -210,6 +212,7 @@ void DivExportXM::run() {
           newNote=true;
         }
         if (d[DIV_PAT_INS]>=0 && d[DIV_PAT_INS]<insCount) cell.ins=d[DIV_PAT_INS]+1;
+        else if (d[DIV_PAT_INS]>=insCount) loss[L_INS_LIMIT]++;
         // an instrument trigger resets the XM pan to the sample's, written as 128
         if (newNote && cell.ins) chXmPan[c]=128;
         if (d[DIV_PAT_VOL]>=0) chVol[c]=d[DIV_PAT_VOL]&127;
@@ -302,7 +305,7 @@ void DivExportXM::run() {
     } else {
       order.push_back(it->second);
     }
-    progress[0].amount=0.5f*(o+1)/sub->ordersLen;
+    progressAmount=0.5f*(o+1)/sub->ordersLen;
   }
   if (order.size()>256 || patBytes.size()>256) {
     logAppendf("ERROR: %d orders, %d patterns; XM holds 256 of each",(int)order.size(),(int)patBytes.size());
@@ -443,7 +446,7 @@ void DivExportXM::run() {
       short prev=0;
       for (short x: v) { w16(w,(short)(x-prev)); prev=x; }
     }
-    progress[0].amount=0.5f+0.5f*(i+1)/insCount;
+    progressAmount=0.5f+0.5f*(i+1)/insCount;
   }
   for (int s=0; s<e->song.sampleLen; s++) if (sampleUses[s]>1) loss[L_SHARED_SAMPLE]++;
 
@@ -455,7 +458,7 @@ void DivExportXM::run() {
     total++;
   }
   if (!total) logAppend("no losses");
-  progress[0].amount=1.0f;
+  progressAmount=1.0f;
   logAppend("finished!");
   output.push_back(DivROMExportOutput("out.xm",w));
   running=false;
@@ -464,6 +467,7 @@ void DivExportXM::run() {
 bool DivExportXM::go(DivEngine* eng) {
   progress[0].name="Export";
   progress[0].amount=0.0f;
+  progressAmount=0.0f;
   e=eng;
   running=true;
   failed=false;
@@ -495,5 +499,7 @@ void DivExportXM::wait() {
 
 DivROMExportProgress DivExportXM::getProgress(int index) {
   if (index<0 || index>1) return progress[1];
-  return progress[index];
+  DivROMExportProgress p=progress[index];
+  if (index==0) p.amount=progressAmount;
+  return p;
 }

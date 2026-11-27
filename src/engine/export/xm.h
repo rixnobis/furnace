@@ -29,6 +29,8 @@ class DivExportXM: public DivROMExport {
   std::thread* exportThread;
   DivROMExportProgress progress[2];
   std::atomic<bool> running, failed, mustAbort;
+  // written by the export thread, read by getProgress
+  std::atomic<float> progressAmount;
   void run();
   public:
     bool go(DivEngine* e);
