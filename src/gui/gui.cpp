@@ -6215,7 +6215,8 @@ bool FurnaceGUI::loop() {
           if (curFileDialog==GUI_FILE_EXPORT_S98) {
             checkExtension(".s98");
           }
-          if (curFileDialog==GUI_FILE_EXPORT_ROM) {
+          if (curFileDialog==GUI_FILE_EXPORT_ROM && !romMultiFile) {
+            // a multi-file export is saved into the selected directory
             checkExtension(romFilterExt.c_str());
           }
           if (curFileDialog==GUI_FILE_EXPORT_TEXT) {
@@ -7163,6 +7164,11 @@ bool FurnaceGUI::loop() {
           WAKE_UP;
           if (ImGui::Button(_("Abort"),ImVec2(ImGui::GetContentRegionAvail().x,0.0f))) {
             pendingExport->abort();
+            // the worker may have finished before the abort: nobody saves its output now
+            for (DivROMExportOutput& i: pendingExport->getResult()) {
+              i.data->finish();
+              delete i.data;
+            }
             delete pendingExport;
             pendingExport=NULL;
             romExportSave=false;

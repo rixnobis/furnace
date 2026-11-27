@@ -57,7 +57,6 @@
 // SPUCNT: SPU enable, unmute, reverb master enable (bit 7), noise clock in bits 13-8
 #define PS1_SPUCNT_ON 0xc000
 #define PS1_SPUCNT_REVERB 0x0080
-#define PS1_NOISE_DEFAULT 0x20
 
 // the standard reverb presets from psx-spx ("SPU Reverb Examples"): work area size in bytes,
 // then 1F801DC0h..1F801DFEh (dAPF1 ... vRIN).
