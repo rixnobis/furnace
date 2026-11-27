@@ -110,7 +110,7 @@ struct ADSRSim {
         if (level>=0x7fff) { level=0x7fff; phase=1; counter=0; }
       } else if (phase==1) {
         int shift=(a1>>4)&15;
-        level-=stepOnce(counter,shift<<2,8,true,true,level);
+        level-=stepOnce(counter,shift,8,true,true,level);
         if (level<0) level=0;
         int sl=((a1&15)+1)<<11;
         if (level<=sl) { phase=2; counter=0; }
@@ -210,6 +210,8 @@ void DivExportXM::run() {
           newNote=true;
         }
         if (d[DIV_PAT_INS]>=0 && d[DIV_PAT_INS]<insCount) cell.ins=d[DIV_PAT_INS]+1;
+        // an instrument trigger resets the XM pan to the sample's, written as 128
+        if (newNote && cell.ins) chXmPan[c]=128;
         if (d[DIV_PAT_VOL]>=0) chVol[c]=d[DIV_PAT_VOL]&127;
         bool panChanged=false;
         int keyOff=-1;
